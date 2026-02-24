@@ -512,12 +512,15 @@ function PaymentDashboard({ onLogout, userName }) {
     : pendItems;
   var fClrItems = selDay ? clrItems.filter(function(p){return p.dueDate<=selDay;}) : clrItems;
 
-  // Future items: when selDay is in the future, show unpaid items between tomorrow and selDay
+  // Future items: show unpaid items after today — when a future date is selected OR when searching
   var futureItems = useMemo(function() {
-    if (!selDay || selDay <= td) return [];
-    return allPayments.filter(function(p) { return p.status === UNPAID && p.dueDate > td && p.dueDate <= selDay; }).filter(searchFilter)
+    var hasSearch = !!searchQ;
+    var hasFutureDay = selDay && selDay > td;
+    if (!hasSearch && !hasFutureDay) return [];
+    var maxDate = hasFutureDay ? selDay : "9999-12-31";
+    return allPayments.filter(function(p) { return p.status === UNPAID && p.dueDate > td && p.dueDate <= maxDate; }).filter(searchFilter)
       .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount; });
-  }, [allPayments, selDay, td, searchFilter]);
+  }, [allPayments, selDay, td, searchFilter, searchQ]);
 
   var actionTotal = sum(fActionItems,true);
   var exclTotal = sum(fActionItems.filter(function(p){return p.excluded;}),false);
@@ -1399,7 +1402,7 @@ function PaymentDashboard({ onLogout, userName }) {
                   <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#8B5CF6" }} />
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#6d28d9" }}>Upcoming</span>
                   <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#7c3aed" }}>{fmt(sum(futureItems.filter(function(p) { return !p.excluded; }), false))}</span>
-                  <span style={{ fontSize: 11, color: "#a78bfa" }}>through {fmtS(selDay)}</span>
+                  {selDay && <span style={{ fontSize: 11, color: "#a78bfa" }}>through {fmtS(selDay)}</span>}
                   <div style={{ flex: 1 }} />
                   <button onClick={function() { selAll(futureItems); }} style={{ background: "none", border: "none", color: "#a78bfa", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
                 </div>
