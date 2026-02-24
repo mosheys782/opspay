@@ -902,17 +902,28 @@ function PaymentDashboard({ onLogout, userName }) {
   function generateSummary() {
     var today = new Date();
     var dateStr = today.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+    var throughDate = selDay && selDay > td ? selDay : null;
 
-    // Get all due/past-due items (unpaid, due today or earlier), excluding skipped
+    // Get items: due/past-due + future if date selected, excluding skipped
+    var cutoff = throughDate || td;
     var dueItems = allPayments.filter(function(p) {
-      return p.status === UNPAID && p.dueDate <= td && !p.excluded;
+      return p.status === UNPAID && p.dueDate <= cutoff && !p.excluded;
     }).sort(function(a, b) {
       return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount;
     });
 
+    var totalDue = dueItems.reduce(function(s, p) { return s + effAmt(p); }, 0);
+    var fundingGap = totalDue - avail;
+
     var lines = [];
-    lines.push("💰 *OpsPay — Daily Summary*");
-    lines.push("📅 " + dateStr);
+    if (throughDate) {
+      lines.push("💰 *OpsPay — Funding Summary*");
+      lines.push("📅 " + dateStr);
+      lines.push("📆 *Through:* " + fmtS(throughDate) + " (" + dayN(throughDate) + ")");
+    } else {
+      lines.push("💰 *OpsPay — Daily Summary*");
+      lines.push("📅 " + dateStr);
+    }
     lines.push("");
 
     // Balances
@@ -921,15 +932,15 @@ function PaymentDashboard({ onLogout, userName }) {
     lines.push("");
 
     // Funding
-    if (actionTotal > 0) {
-      lines.push("💵 *Total Payments Due:* " + fmt(actionTotal));
-      if (isShort) {
-        lines.push("🔴 *Additional Funding Needed:* " + fmt(gap));
+    if (totalDue > 0) {
+      lines.push("💵 *Total Payments Due" + (throughDate ? " Through " + fmtS(throughDate) : "") + ":* " + fmt(totalDue));
+      if (fundingGap > 0) {
+        lines.push("🔴 *Additional Funding Needed:* " + fmt(fundingGap));
       } else {
-        lines.push("✅ *No additional funding needed* — covered by " + fmt(avail - actionTotal));
+        lines.push("✅ *No additional funding needed* — covered by " + fmt(Math.abs(fundingGap)));
       }
     } else {
-      lines.push("✅ *No payments due today* — all caught up!");
+      lines.push("✅ *No payments due" + (throughDate ? " through " + fmtS(throughDate) : " today") + "* — all caught up!");
     }
 
     if (pendTotal > 0) {
@@ -949,9 +960,11 @@ function PaymentDashboard({ onLogout, userName }) {
           lastDate = p.dueDate;
           if (p.dueDate === td) {
             lines.push("▸ *Due Today:*");
-          } else {
+          } else if (p.dueDate < td) {
             var daysOver = Math.floor((new Date(td + "T12:00:00") - new Date(p.dueDate + "T12:00:00")) / 86400000);
             lines.push("▸ *" + fmtS(p.dueDate) + "* (" + daysOver + "d overdue):");
+          } else {
+            lines.push("▸ *" + fmtS(p.dueDate) + "* (" + dayN(p.dueDate) + "):");
           }
         }
         var amtStr = fmt(effAmt(p));
