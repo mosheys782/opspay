@@ -361,6 +361,9 @@ function PaymentDashboard({ onLogout, userName }) {
   var [noteIn, setNoteIn] = useState("");
   var [fcFrom, setFcFrom] = useState(getToday());
   var [fcTo, setFcTo] = useState(function(){var d=new Date();d.setDate(d.getDate()+30);return toISO(d);});
+  var [editEmpName, setEditEmpName] = useState(null);   // name of employee being edited
+  var [editEmpF, setEditEmpF] = useState(null);          // edit form data for employee
+  var [searchQ, setSearchQ] = useState("");               // global search query
 
   var cfgTimer = useRef(null);
   var refreshTimer = useRef(null);
@@ -468,22 +471,35 @@ function PaymentDashboard({ onLogout, userName }) {
     }, 1500);
   }, [bal, emps, tmpls, ready]);
 
+  /* ══════ SEARCH FILTER ══════ */
+  var searchFilter = useCallback(function(p) {
+    if (!searchQ) return true;
+    var q = searchQ.toLowerCase();
+    return (p.name && p.name.toLowerCase().indexOf(q) !== -1) ||
+      (p.category && p.category.toLowerCase().indexOf(q) !== -1) ||
+      (p.checkNum && p.checkNum.toLowerCase().indexOf(q) !== -1) ||
+      (p.note && p.note.toLowerCase().indexOf(q) !== -1) ||
+      (p.empName && p.empName.toLowerCase().indexOf(q) !== -1) ||
+      (p.amount && String(p.amount).indexOf(q) !== -1) ||
+      (p.dueDate && p.dueDate.indexOf(q) !== -1);
+  }, [searchQ]);
+
   /* ══════ DERIVED DATA ══════ */
   var td = getToday();
   var allPayments = useMemo(function() { return Object.values(payments); }, [payments]);
 
   var actionItems = useMemo(function() {
-    return allPayments.filter(function(p){return p.status===UNPAID && p.dueDate<=td;})
+    return allPayments.filter(function(p){return p.status===UNPAID && p.dueDate<=td;}).filter(searchFilter)
       .sort(function(a,b){return a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:b.amount-a.amount;});
-  }, [allPayments, td]);
+  }, [allPayments, td, searchFilter]);
   var todayItems = useMemo(function(){return actionItems.filter(function(p){return p.dueDate===td;});}, [actionItems,td]);
   var pastItems = useMemo(function(){return actionItems.filter(function(p){return p.dueDate<td;});}, [actionItems,td]);
   var pendItems = useMemo(function(){
-    return allPayments.filter(function(p){return p.status===PAID;}).sort(function(a,b){return a.dueDate<b.dueDate?-1:1;});
-  }, [allPayments]);
+    return allPayments.filter(function(p){return p.status===PAID;}).filter(searchFilter).sort(function(a,b){return a.dueDate<b.dueDate?-1:1;});
+  }, [allPayments, searchFilter]);
   var clrItems = useMemo(function(){
-    return allPayments.filter(function(p){return p.status===CLEARED;}).sort(function(a,b){return a.dueDate>b.dueDate?-1:1;});
-  }, [allPayments]);
+    return allPayments.filter(function(p){return p.status===CLEARED;}).filter(searchFilter).sort(function(a,b){return a.dueDate>b.dueDate?-1:1;});
+  }, [allPayments, searchFilter]);
 
   var sum = function(arr,filterExcl){return arr.filter(function(p){return filterExcl?!p.excluded:true;}).reduce(function(s,p){return s+effAmt(p);},0);};
 
@@ -499,9 +515,9 @@ function PaymentDashboard({ onLogout, userName }) {
   // Future items: when selDay is in the future, show unpaid items between tomorrow and selDay
   var futureItems = useMemo(function() {
     if (!selDay || selDay <= td) return [];
-    return allPayments.filter(function(p) { return p.status === UNPAID && p.dueDate > td && p.dueDate <= selDay; })
+    return allPayments.filter(function(p) { return p.status === UNPAID && p.dueDate > td && p.dueDate <= selDay; }).filter(searchFilter)
       .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount; });
-  }, [allPayments, selDay, td]);
+  }, [allPayments, selDay, td, searchFilter]);
 
   var actionTotal = sum(fActionItems,true);
   var exclTotal = sum(fActionItems.filter(function(p){return p.excluded;}),false);
@@ -789,6 +805,25 @@ function PaymentDashboard({ onLogout, userName }) {
   }
   function unpauseEmp(n) {
     setEmps(function(p){return p.map(function(e){return e.name===n?Object.assign({},e,{pauseFrom:"",pauseTo:""}):e;});});
+  }
+  function openEditEmp(emp) {
+    setEditEmpName(emp.name);
+    setEditEmpF({ name: emp.name, salary: String(emp.salary), startDate: emp.startDate || "" });
+  }
+  function saveEditEmp() {
+    if (!editEmpF || !editEmpName) return;
+    setEmps(function(prev) {
+      return prev.map(function(e) {
+        if (e.name !== editEmpName) return e;
+        return Object.assign({}, e, {
+          name: editEmpF.name,
+          salary: parseFloat(editEmpF.salary) || e.salary,
+          startDate: editEmpF.startDate || e.startDate
+        });
+      });
+    });
+    setEditEmpName(null);
+    setEditEmpF(null);
   }
   var [pauseEmpName, setPauseEmpName] = useState(null);
   var [pauseFrom, setPauseFrom] = useState(getToday());
@@ -1110,7 +1145,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "6px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: "#1e40af" }}>📅 Funding needed through: {fmtS(selDay)} ({dayN(selDay)})</span>
             <div style={{ flex: 1 }} />
-            <button onClick={function() { setSelDay(null); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
+            <button onClick={function() { setSelDay(null); setShowCal(false); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
           </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 16, marginBottom: 24 }}>
@@ -1203,7 +1238,27 @@ function PaymentDashboard({ onLogout, userName }) {
           </button>
           <span style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>Today</span>
           <span style={{ fontSize: 12, color: "#64748B" }}>{fmtS(td)} · {dayN(td)}</span>
+          <div style={{ flex: 1 }} />
+          {/* Search bar */}
+          <div style={{ position: "relative", width: 240 }}>
+            <input value={searchQ} onChange={function(e) { setSearchQ(e.target.value); }} placeholder="Search name, check #, amount, notes..." style={{
+              width: "100%", padding: "7px 12px 7px 32px", borderRadius: 8, border: searchQ ? "2px solid #3b82f6" : "1px solid #e2e8f0",
+              fontSize: 12, outline: "none", color: "#111827", background: searchQ ? "#eff6ff" : "white", fontFamily: "inherit"
+            }} />
+            <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "#94a3b8", pointerEvents: "none" }}>🔍</span>
+            {searchQ && <button onClick={function() { setSearchQ(""); }} style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "#94a3b8", fontSize: 12, padding: 2 }}>✕</button>}
+          </div>
         </div>
+
+        {/* Search active indicator */}
+        {searchQ && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "5px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#1e40af" }}>🔍 Showing results for: "{searchQ}"</span>
+            <span style={{ fontSize: 11, color: "#64748b" }}>({actionItems.length + pendItems.length + clrItems.length + futureItems.length} matches)</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={function() { setSearchQ(""); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear search</button>
+          </div>
+        )}
 
         {/* Calendar */}
         {showCal && (
@@ -1215,6 +1270,7 @@ function PaymentDashboard({ onLogout, userName }) {
                 <button onClick={function() { var t = new Date(); setCy(t.getFullYear()); setCm(t.getMonth()); setShowCal(false); }} style={{ background: "rgba(59,130,246,.1)", border: "none", borderRadius: 4, padding: "2px 7px", color: "#60A5FA", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>Today</button>
               </div>
               <button onClick={function() { navMo(1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>›</button>
+              <button onClick={function() { setShowCal(false); setSelDay(null); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#64748b", fontSize: 12, fontWeight: 600, marginLeft: 4 }}>✕</button>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2, marginBottom: 2 }}>
               {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(function(d) { return <div key={d} style={{ textAlign: "center", fontSize: 10, fontWeight: 600, color: "#6b7280", padding: "4px 0" }}>{d}</div>; })}
@@ -1579,11 +1635,41 @@ function PaymentDashboard({ onLogout, userName }) {
       </Modal>
 
       {/* Employees */}
-      <Modal open={showEmp} onClose={function() { setShowEmp(false); }}>
+      <Modal open={showEmp} onClose={function() { setShowEmp(false); setEditEmpName(null); setEditEmpF(null); }}>
         <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 10 }}>👥 Employees</h2>
         <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
           {emps.map(function(e) {
             var isPaused = e.pauseFrom && (!e.pauseTo || e.pauseTo >= getToday());
+            var isEditing = editEmpName === e.name && editEmpF;
+
+            if (isEditing) {
+              return (
+                <div key={e.name} style={{ padding: "10px", background: "#eff6ff", borderRadius: 8, border: "2px solid #3b82f6" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#1e40af", marginBottom: 6 }}>✏️ Editing: {e.name}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                      <div>
+                        <Label text="Name" />
+                        <input value={editEmpF.name} onChange={function(ev) { setEditEmpF(Object.assign({}, editEmpF, { name: ev.target.value })); }} style={{ width: "100%", padding: "5px 8px", borderRadius: 5, border: "1px solid #93c5fd", fontSize: 11, outline: "none", color: "#0F172A" }} />
+                      </div>
+                      <div>
+                        <Label text="Pay Amount" />
+                        <input value={editEmpF.salary} onChange={function(ev) { setEditEmpF(Object.assign({}, editEmpF, { salary: ev.target.value })); }} type="number" step=".01" style={{ width: "100%", padding: "5px 8px", borderRadius: 5, border: "1px solid #93c5fd", fontSize: 11, fontFamily: "'JetBrains Mono',monospace", outline: "none", color: "#0F172A" }} />
+                      </div>
+                    </div>
+                    <div>
+                      <Label text="Start Date" />
+                      <input type="date" value={editEmpF.startDate} onChange={function(ev) { setEditEmpF(Object.assign({}, editEmpF, { startDate: ev.target.value })); }} style={{ width: "100%", padding: "5px 8px", borderRadius: 5, border: "1px solid #93c5fd", fontSize: 11, outline: "none", color: "#0F172A" }} />
+                    </div>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button onClick={function() { setEditEmpName(null); setEditEmpF(null); }} style={{ flex: 1, padding: "5px", background: "white", border: "1px solid #d1d5db", borderRadius: 5, fontSize: 11, cursor: "pointer", color: "#374151" }}>Cancel</button>
+                      <button onClick={saveEditEmp} style={{ flex: 1, padding: "5px", background: "#3b82f6", color: "white", border: "none", borderRadius: 5, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Save</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
             return (
               <div key={e.name} style={{ padding: "8px 10px", background: isPaused ? "#fef2f2" : "#F8FAFC", borderRadius: 6, border: isPaused ? "1px solid #fecaca" : "1px solid #E2E8F0" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1591,6 +1677,7 @@ function PaymentDashboard({ onLogout, userName }) {
                     <div style={{ fontSize: 12, fontWeight: 600, color: isPaused ? "#991b1b" : "#0F172A" }}>{e.name} {isPaused && <span style={{ fontSize: 10, color: "#dc2626", fontWeight: 700 }}>⏸ PAUSED</span>}</div>
                     <div style={{ fontSize: 10, color: "#64748B", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(e.salary)}</div>
                   </div>
+                  <button onClick={function() { openEditEmp(e); }} title="Edit" style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#2563eb", fontSize: 10, fontWeight: 600 }}>✏️</button>
                   {isPaused ? (
                     <button onClick={function() { unpauseEmp(e.name); }} style={{ background: "#d1fae5", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#059669", fontSize: 10, fontWeight: 600 }}>▶ Resume</button>
                   ) : (
@@ -1631,7 +1718,7 @@ function PaymentDashboard({ onLogout, userName }) {
             <button onClick={addEmp} style={{ background: "#3B82F6", color: "#fff", border: "none", borderRadius: 5, padding: "5px 9px", cursor: "pointer", fontWeight: 600, fontSize: 10 }}>Add</button>
           </div>
         </div>
-        <button onClick={function() { setShowEmp(false); }} style={{ width: "100%", marginTop: 10, padding: 9, borderRadius: 8, border: "none", background: "#0F172A", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Done</button>
+        <button onClick={function() { setShowEmp(false); setEditEmpName(null); setEditEmpF(null); }} style={{ width: "100%", marginTop: 10, padding: 9, borderRadius: 8, border: "none", background: "#0F172A", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Done</button>
       </Modal>
 
       <footer style={{ textAlign: "center", padding: 24, color: "#6b7280", fontSize: 13, display: "flex", justifyContent: "center", alignItems: "center", gap: 12 }}>
