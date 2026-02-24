@@ -551,8 +551,9 @@ function PaymentDashboard({ onLogout, userName }) {
 
   var dayItems = useMemo(function() {
     if (!selDay) return [];
-    return allPayments.filter(function(p) { return p.dueDate === selDay; })
-      .sort(function(a,b) { return a.status === CLEARED ? 1 : b.status === CLEARED ? -1 : a.name < b.name ? -1 : 1; });
+    // Show all unpaid + pending items from today through selected date (matching card calculation)
+    return allPayments.filter(function(p) { return p.status !== CLEARED && p.dueDate <= selDay; })
+      .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : a.name < b.name ? -1 : 1; });
   }, [selDay, allPayments]);
 
   /* ══════ ACTIONS — optimistic UI + background SP write ══════ */
@@ -1200,7 +1201,7 @@ function PaymentDashboard({ onLogout, userName }) {
               <div style={{ marginTop: 10, borderTop: "1px solid #e5e7eb", paddingTop: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1e40af" }}>{fmtS(selDay)}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1e40af" }}>Through {fmtS(selDay)}</span>
                     <span style={{ fontSize: 12, color: "#64748b" }}>{dayN(selDay)}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
