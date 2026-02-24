@@ -1,0 +1,1657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpsPay - Payment Operations</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+  <script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%); min-height: 100vh; color: #1e293b; }
+    input, select, textarea, button { font-family: inherit; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:16px;color:#64748b">Loading...</div></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+    // ════════════════════════════════════════
+    //  AZURE AD CONFIG
+    // ════════════════════════════════════════
+    const AZURE = {
+      clientId: '37c72bb9-42bb-4416-af86-ea5754021802',
+      tenantId: '8b20613e-54c4-43a3-af63-92cdbf260edb',
+      siteHostname: 'gancfried.sharepoint.com',
+      sitePath: '/sites/GIBUSA',
+      redirectUri: window.location.href.split('?')[0].split('#')[0]
+    };
+    const msalConfig = {
+      auth: { clientId: AZURE.clientId, authority: 'https://login.microsoftonline.com/' + AZURE.tenantId, redirectUri: AZURE.redirectUri },
+      cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
+    };
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+    const loginRequest = { scopes: ['User.Read', 'Sites.ReadWrite.All', 'Sites.Manage.All'] };
+
+    // ════════════════════════════════════════
+    //  GRAPH API
+    // ════════════════════════════════════════
+    async function getToken() {
+      var a = msalInstance.getAllAccounts();
+      if (!a.length) throw new Error('No account');
+      try { return (await msalInstance.acquireTokenSilent({ scopes: ['Sites.ReadWrite.All'], account: a[0] })).accessToken; }
+      catch (e) { return (await msalInstance.acquireTokenPopup(loginRequest)).accessToken; }
+    }
+    async function gFetch(url, opts) {
+      var t = await getToken();
+      var r = await fetch('https://graph.microsoft.com/v1.0' + url, {
+        headers: { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json', 'Prefer': 'HonorNonIndexedQueriesWarningMayFailRandomly' },
+        ...opts
+      });
+      if (!r.ok) { var b = await r.text(); throw new Error(r.status + ': ' + b.substring(0, 500)); }
+      return r.status === 204 ? null : r.json();
+    }
+
+    // ════════════════════════════════════════
+    //  SHAREPOINT — PROPER LIST STRUCTURE
+    // ════════════════════════════════════════
+    var SP = { siteId: null, payListId: null, cfgListId: null, cfgItemId: null };
+
+    var PAY_COLUMNS = [
+      { name: 'PayKey', text: {} },
+      { name: 'Category', text: {} },
+      { name: 'Amount', number: {} },
+      { name: 'DueDate', text: {} },
+      { name: 'PayStatus', text: {} },
+      { name: 'CheckNum', text: {} },
+      { name: 'PayNote', text: { allowMultipleLines: true, maxLength: 0 } },
+      { name: 'AutoPay', boolean: {} },
+      { name: 'IsPayroll', boolean: {} },
+      { name: 'EmpName', text: {} },
+      { name: 'Excluded', boolean: {} },
+      { name: 'MinPay', number: {} },
+      { name: 'CloseDate', text: {} },
+      { name: 'UseMin', boolean: {} },
+      { name: 'MonthKey', text: {} },
+      { name: 'Varies', boolean: {} },
+    ];
+
+    async function ensureList(name, extraCols) {
+      var base = '/sites/' + SP.siteId + '/lists/';
+      var listId;
+      try { var l = await gFetch(base + name); listId = l.id; }
+      catch(e) {
+        var body = { displayName: name, list: { template: 'genericList' } };
+        var l2 = await gFetch(base.slice(0, -1), { method: 'POST', body: JSON.stringify(body) });
+        listId = l2.id;
+        console.log('Created list:', name, listId);
+      }
+      // Ensure all columns exist (idempotent)
+      if (extraCols) {
+        var existing = await gFetch(base + listId + '/columns');
+        var existingNames = (existing.value || []).map(function(c) { return c.name; });
+        for (var i = 0; i < extraCols.length; i++) {
+          if (existingNames.indexOf(extraCols[i].name) === -1) {
+            try {
+              await gFetch(base + listId + '/columns', { method: 'POST', body: JSON.stringify(extraCols[i]) });
+              console.log('Added column:', extraCols[i].name);
+            } catch(e2) { console.warn('Column ' + extraCols[i].name + ':', e2.message); }
+          }
+        }
+      }
+      return listId;
+    }
+
+    async function getAllItems(listId) {
+      var all = [], url = '/sites/' + SP.siteId + '/lists/' + listId + '/items?$expand=fields&$top=250';
+      while (url) {
+        var r = await gFetch(url);
+        all = all.concat(r.value || []);
+        url = r['@odata.nextLink'] ? r['@odata.nextLink'].replace('https://graph.microsoft.com/v1.0', '') : null;
+      }
+      return all;
+    }
+
+    async function initSP() {
+      var s = await gFetch('/sites/' + AZURE.siteHostname + ':' + AZURE.sitePath);
+      SP.siteId = s.id;
+      SP.payListId = await ensureList('OpsPay_Payments', PAY_COLUMNS);
+      SP.cfgListId = await ensureList('OpsPay_Config', [{ name: 'ConfigData', text: { allowMultipleLines: true, maxLength: 0 } }]);
+      // Find or create config item
+      var cfgItems = await getAllItems(SP.cfgListId);
+      var cfgMain = cfgItems.find(function(i) { return i.fields.Title === 'main'; });
+      if (cfgMain) { SP.cfgItemId = cfgMain.id; }
+      else {
+        var n = await gFetch('/sites/' + SP.siteId + '/lists/' + SP.cfgListId + '/items', {
+          method: 'POST', body: JSON.stringify({ fields: { Title: 'main', ConfigData: '{}' } })
+        });
+        SP.cfgItemId = n.id;
+      }
+      console.log('SP init:', SP);
+    }
+
+    // Config CRUD
+    async function spLoadConfig() {
+      var r = await gFetch('/sites/' + SP.siteId + '/lists/' + SP.cfgListId + '/items/' + SP.cfgItemId + '?$expand=fields');
+      var raw = r.fields.ConfigData;
+      return raw ? JSON.parse(raw) : {};
+    }
+    async function spSaveConfig(data) {
+      await gFetch('/sites/' + SP.siteId + '/lists/' + SP.cfgListId + '/items/' + SP.cfgItemId + '/fields', {
+        method: 'PATCH', body: JSON.stringify({ ConfigData: JSON.stringify(data) })
+      });
+    }
+
+    // Payment row CRUD
+    function payToFields(p) {
+      return {
+        Title: p.name, PayKey: p.id, Category: p.category, Amount: p.amount,
+        DueDate: p.dueDate, PayStatus: p.status, CheckNum: p.checkNum || '',
+        PayNote: p.note || '', AutoPay: !!p.autoPay, IsPayroll: !!p.isPayroll,
+        EmpName: p.empName || '', Excluded: !!p.excluded, MinPay: p.minPay || 0,
+        CloseDate: p.closeDate || '', UseMin: !!p.useMin,
+        MonthKey: p.dueDate ? p.dueDate.substring(0, 7) : '', Varies: !!p.varies,
+      };
+    }
+    function fieldsToPay(f, spId) {
+      return {
+        id: f.PayKey, _spId: spId, name: f.Title, category: f.Category || 'Other',
+        amount: f.Amount || 0, dueDate: f.DueDate || '', status: f.PayStatus || 'unpaid',
+        checkNum: f.CheckNum || '', note: f.PayNote || '', autoPay: !!f.AutoPay,
+        isPayroll: !!f.IsPayroll, empName: f.EmpName || '', excluded: !!f.Excluded,
+        minPay: f.MinPay || 0, closeDate: f.CloseDate || '', useMin: !!f.UseMin,
+        varies: !!f.Varies,
+      };
+    }
+
+    async function spCreatePay(p) {
+      var r = await gFetch('/sites/' + SP.siteId + '/lists/' + SP.payListId + '/items', {
+        method: 'POST', body: JSON.stringify({ fields: payToFields(p) })
+      });
+      return r.id;
+    }
+    async function spUpdatePay(spId, fields) {
+      await gFetch('/sites/' + SP.siteId + '/lists/' + SP.payListId + '/items/' + spId + '/fields', {
+        method: 'PATCH', body: JSON.stringify(fields)
+      });
+    }
+    async function spDeletePay(spId) {
+      await gFetch('/sites/' + SP.siteId + '/lists/' + SP.payListId + '/items/' + spId, { method: 'DELETE' });
+    }
+    async function spLoadAllPay() {
+      var items = await getAllItems(SP.payListId);
+      var map = {};
+      items.forEach(function(item) { map[item.fields.PayKey || item.fields.Title] = fieldsToPay(item.fields, item.id); });
+      return map;
+    }
+
+    // ════════════════════════════════════════
+    //  PAYMENT DASHBOARD
+    // ════════════════════════════════════════
+
+/* ── Constants ── */
+const UNPAID = "unpaid", PAID = "paid", CLEARED = "cleared";
+const CATS = {
+  "Credit Card": { bg: "#FEF3C7", tx: "#92400E", dot: "#F59E0B" },
+  "Payroll": { bg: "#DBEAFE", tx: "#1E40AF", dot: "#3B82F6" },
+  "Rent": { bg: "#E0E7FF", tx: "#3730A3", dot: "#6366F1" },
+  "Mortgage": { bg: "#FCE7F3", tx: "#9D174D", dot: "#EC4899" },
+  "Health Insurance": { bg: "#D1FAE5", tx: "#065F46", dot: "#10B981" },
+  "Invoice": { bg: "#FEE2E2", tx: "#991B1B", dot: "#EF4444" },
+  "Utilities": { bg: "#FEF9C3", tx: "#854D0E", dot: "#EAB308" },
+  "Other": { bg: "#F3F4F6", tx: "#374151", dot: "#6B7280" },
+};
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+/* ── Helpers ── */
+function fmt(n) { return new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(n); }
+function pad(n) { return String(n).padStart(2,"0"); }
+function toISO(d) { return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
+function parseD(s) { var p=s.split("-"); return new Date(+p[0],+p[1]-1,+p[2]); }
+function getToday() { return toISO(new Date()); }
+function daysIn(y,m) { return new Date(y,m+1,0).getDate(); }
+function fmtS(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}); }
+function dayN(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"long"}); }
+function overdueTxt(s) { var diff=Math.floor((new Date(getToday()+"T12:00:00")-new Date(s+"T12:00:00"))/86400000); if(diff===1) return "1 day overdue"; if(diff>1) return diff+" days overdue"; return "due today"; }
+function effAmt(p) { if(p.category==="Credit Card"&&p.useMin&&p.minPay>0) return p.minPay; return p.amount; }
+
+/* ── Payroll dates: bi-weekly Wed from March 4 2026 ── */
+function payrollDates(year,month) {
+  var anchor=new Date(2026,2,4),s=new Date(year,month,1),e=new Date(year,month+1,0);
+  // Calculate bi-weekly cycle from anchor (works both forwards and backwards)
+  var diff=Math.floor((s-anchor)/86400000);
+  var c=new Date(anchor.getTime()+(Math.floor(diff/14)-1)*14*86400000);
+  var out=[];
+  for(var i=0;i<10;i++){if(c>=s&&c<=e) out.push(toISO(c));if(c>e) break;c=new Date(c.getTime()+14*86400000);}
+  return out;
+}
+
+var DEF_EMPS = [
+  {name:"Maria Santos",salary:4200,startDate:"2026-03-04"},
+  {name:"James Wilson",salary:3800,startDate:"2026-03-04"},
+  {name:"Sarah Chen",salary:4500,startDate:"2026-03-04"},
+  {name:"David Miller",salary:3600,startDate:"2026-03-04"},
+  {name:"Aisha Patel",salary:4100,startDate:"2026-03-04"},
+  {name:"Robert Johnson",salary:3900,startDate:"2026-03-04"},
+];
+var DEF_REC = [
+  {name:"Amex Business Card",category:"Credit Card",amount:4250,minPay:85,closeDay:8,dayOfMonth:15,autoPay:true,varies:true,startDate:"2026-02-24"},
+  {name:"Chase Visa",category:"Credit Card",amount:1875.5,minPay:45,closeDay:12,dayOfMonth:20,autoPay:true,varies:true,startDate:"2026-02-24"},
+  {name:"Office Rent",category:"Rent",amount:6200,dayOfMonth:1,autoPay:false,varies:false,startDate:"2026-02-24"},
+  {name:"Building Mortgage",category:"Mortgage",amount:3450,dayOfMonth:5,autoPay:true,varies:false,startDate:"2026-02-24"},
+  {name:"Blue Cross Health",category:"Health Insurance",amount:2890,dayOfMonth:1,autoPay:true,varies:true,startDate:"2026-02-24"},
+];
+
+/* ── Generate expected payments for a month (in-memory, not stored) ── */
+function genExpected(year, month, tmpls, emps) {
+  var out = [], mk = year+"-"+pad(month+1), dm = daysIn(year,month);
+  var monthStart = mk + "-01";
+  var monthEnd = mk + "-" + pad(dm);
+
+  tmpls.forEach(function(t) {
+    // Skip if template has a startDate and this month is before it
+    if (t.startDate && monthEnd < t.startDate) return;
+    // Skip if template has an endDate and this month is after it
+    if (t.endDate && monthStart > t.endDate) return;
+
+    var dy = Math.min(t.dayOfMonth, dm);
+    var dueDate = mk+"-"+pad(dy);
+    // For the start month, skip if due date is before startDate
+    if (t.startDate && dueDate < t.startDate) return;
+    // For the end month, skip if due date is after endDate
+    if (t.endDate && dueDate > t.endDate) return;
+
+    var isCC = t.category === "Credit Card";
+    out.push({
+      id: "r-"+mk+"-"+t.name, name: t.name, category: t.category, amount: t.amount,
+      minPay: isCC?(t.minPay||0):0, closeDate: isCC?mk+"-"+pad(Math.min(t.closeDay||1,dm)):"",
+      useMin: false, dueDate: dueDate, autoPay: t.autoPay, varies: t.varies||false,
+      status: UNPAID, checkNum: "", isPayroll: false, empName: "", excluded: false, note: ""
+    });
+  });
+
+  payrollDates(year,month).forEach(function(date) {
+    emps.forEach(function(emp) {
+      // Skip if employee has a startDate and this date is before it
+      if (emp.startDate && date < emp.startDate) return;
+      // Skip if employee is paused and this date falls within pause range
+      if (emp.pauseFrom && date >= emp.pauseFrom && (!emp.pauseTo || date <= emp.pauseTo)) return;
+
+      out.push({
+        id: "p-"+date+"-"+emp.name, name: "Payroll: "+emp.name, category: "Payroll", amount: emp.salary,
+        minPay:0,closeDate:"",useMin:false,dueDate:date,autoPay:false,varies:false,
+        status:UNPAID,checkNum:"",isPayroll:true,empName:emp.name,excluded:false,note:""
+      });
+    });
+  });
+  return out;
+}
+
+/* ── Styles (light theme) ── */
+var cardS = {background:"white",borderRadius:12,padding:20,boxShadow:"0 1px 3px rgba(0,0,0,0.1)",border:"none",borderLeft:"4px solid #3b82f6"};
+var lblS = {fontSize:12,color:"#64748b",fontWeight:500,textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:4};
+var numS = {fontSize:28,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:"#0f172a"};
+var inputS = {width:"100%",padding:"10px 12px",borderRadius:8,border:"1px solid #d1d5db",fontSize:14,outline:"none",fontFamily:"inherit",color:"#111827",background:"white"};
+var btnPrimary = {flex:1,padding:"10px 20px",borderRadius:8,border:"none",background:"linear-gradient(135deg,#3b82f6,#2563eb)",color:"#fff",fontSize:15,fontWeight:600,cursor:"pointer"};
+var btnSecondary = {flex:1,padding:"10px 20px",borderRadius:8,border:"1px solid #d1d5db",background:"white",color:"#374151",fontSize:15,fontWeight:600,cursor:"pointer"};
+var smBtn = function(bg,color){return{background:bg,border:"none",borderRadius:6,padding:"6px 10px",cursor:"pointer",color:color,fontSize:14,display:"inline-flex",alignItems:"center",justifyContent:"center"};};
+
+/* ── Components ── */
+function Modal({open,onClose,children}) {
+  if(!open) return null;
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.6)",backdropFilter:"blur(4px)"}} onClick={onClose}>
+      <div onClick={function(e){e.stopPropagation();}} style={{background:"#fff",borderRadius:16,padding:24,width:"94%",maxWidth:520,maxHeight:"88vh",overflowY:"auto",boxShadow:"0 25px 50px -12px rgba(0,0,0,0.25)"}}>
+        {children}
+      </div>
+    </div>
+  );
+}
+function Label({text}) { return <label style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:4,display:"block",textTransform:"uppercase",letterSpacing:".05em"}}>{text}</label>; }
+
+function CalIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+      <line x1="16" y1="2" x2="16" y2="6" />
+      <line x1="8" y1="2" x2="8" y2="6" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+    </svg>
+  );
+}
+
+/* ════════════════════════════════════════ */
+/*  MAIN DASHBOARD COMPONENT               */
+/* ════════════════════════════════════════ */
+function PaymentDashboard({ onLogout, userName }) {
+  var now = new Date();
+  var [cy, setCy] = useState(now.getFullYear());
+  var [cm, setCm] = useState(now.getMonth());
+  var [bal, setBal] = useState(45000);
+  var [balIn, setBalIn] = useState("45000");
+  var [editBal, setEditBal] = useState(false);
+  var [emps, setEmps] = useState(DEF_EMPS);
+  var [tmpls, setTmpls] = useState(DEF_REC);
+  var [payments, setPayments] = useState({});  // { payKey: { ...payment, _spId } }
+  var [showCal, setShowCal] = useState(false);
+  var [selDay, setSelDay] = useState(null);  // "2026-03-04" or null
+  var [showAdd, setShowAdd] = useState(false);
+  var [editId, setEditId] = useState(null);
+  var [showEmp, setShowEmp] = useState(false);
+  var [checkId, setCheckId] = useState(null);
+  var [showRec, setShowRec] = useState(false);
+  var [editTmplIdx, setEditTmplIdx] = useState(null);  // index of template being edited
+  var [editTmplF, setEditTmplF] = useState(null);      // edit form data
+  var [showFc, setShowFc] = useState(false);
+  var [noteId, setNoteId] = useState(null);
+  var [ready, setReady] = useState(false);
+  var [tab, setTab] = useState("action");
+  var [saveStatus, setSaveStatus] = useState("saved");
+  var [selected, setSelected] = useState({});  // { payId: true }
+
+  var [form, setForm] = useState({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true});
+  var [recF, setRecF] = useState({name:"",category:"Credit Card",amount:"",dayOfMonth:"1",autoPay:false,varies:true,minPay:"",closeDay:"",startDate:getToday(),endDate:""});
+  var [empF, setEmpF] = useState({name:"",salary:"",startDate:getToday()});
+  var [chkIn, setChkIn] = useState("");
+  var [noteIn, setNoteIn] = useState("");
+  var [fcFrom, setFcFrom] = useState(getToday());
+  var [fcTo, setFcTo] = useState(function(){var d=new Date();d.setDate(d.getDate()+30);return toISO(d);});
+
+  var cfgTimer = useRef(null);
+  var refreshTimer = useRef(null);
+
+  /* ══════ LOAD + ENSURE + BG REFRESH ══════ */
+  async function fullLoad(currentTmpls, currentEmps, viewY, viewM) {
+    // Load all existing payments from SP
+    var payMap = await spLoadAllPay();
+    console.log('Loaded', Object.keys(payMap).length, 'payments from SP');
+
+    // Ensure payments exist for date range (past 4 months through current view)
+    var td2 = getToday(), d = parseD(td2);
+    var sY = d.getFullYear(), sM = d.getMonth() - 4;
+    if (sM < 0) { sM += 12; sY--; }
+    var created = 0;
+    var y = sY, m = sM;
+    while (y < viewY || (y === viewY && m <= viewM)) {
+      var expected = genExpected(y, m, currentTmpls, currentEmps);
+      for (var i = 0; i < expected.length; i++) {
+        if (!payMap[expected[i].id]) {
+          try {
+            var spId = await spCreatePay(expected[i]);
+            expected[i]._spId = spId;
+            payMap[expected[i].id] = expected[i];
+            created++;
+          } catch(e2) { console.error('Create:', e2); }
+        }
+      }
+      m++; if (m > 11) { m = 0; y++; }
+    }
+    if (created > 0) console.log('Created', created, 'new payment rows');
+    return payMap;
+  }
+
+  // Initial load
+  useEffect(function() {
+    (async function() {
+      try {
+        var cfg = await spLoadConfig();
+        var t = cfg.tmpls || DEF_REC;
+        var e = cfg.emps || DEF_EMPS;
+        var today = getToday();
+        // Reset balance to 0 each day — force user to enter current balance
+        var b = (cfg.balDate === today && cfg.bal !== undefined) ? cfg.bal : 0;
+        setBal(b); setBalIn(String(b));
+        if (cfg.balDate !== today) setEditBal(true); // auto-open balance editor
+        setEmps(e); setTmpls(t);
+
+        var payMap = await fullLoad(t, e, cy, cm);
+        setPayments(payMap);
+      } catch(e) { console.error('Load failed:', e); }
+      setReady(true);
+    })();
+  }, []);
+
+  // When view month changes, ensure those payments exist
+  var lastView = useRef(cy + '-' + cm);
+  useEffect(function() {
+    if (!ready) return;
+    var key = cy + '-' + cm;
+    if (key === lastView.current) return;
+    lastView.current = key;
+    (async function() {
+      var payMap = await fullLoad(tmpls, emps, cy, cm);
+      setPayments(payMap);
+    })();
+  }, [cy, cm, ready]);
+
+  // When templates/emps change, regenerate for current range
+  var lastTmpls = useRef(null);
+  useEffect(function() {
+    if (!ready) return;
+    var key = JSON.stringify(tmpls) + JSON.stringify(emps);
+    if (key === lastTmpls.current) return;
+    lastTmpls.current = key;
+    (async function() {
+      var payMap = await fullLoad(tmpls, emps, cy, cm);
+      setPayments(payMap);
+    })();
+  }, [tmpls, emps, ready]);
+
+  // Background refresh every 60 seconds
+  useEffect(function() {
+    if (!ready) return;
+    refreshTimer.current = setInterval(async function() {
+      try {
+        var payMap = await spLoadAllPay();
+        setPayments(payMap);
+        console.log('BG refresh:', Object.keys(payMap).length, 'payments');
+      } catch(e) { console.error('BG refresh failed:', e); }
+    }, 60000);
+    return function() { clearInterval(refreshTimer.current); };
+  }, [ready]);
+
+  /* ══════ SAVE CONFIG (debounced) ══════ */
+  var cfgSkip = useRef(true);
+  useEffect(function() {
+    if (!ready) return;
+    if (cfgSkip.current) { cfgSkip.current = false; return; }
+    if (cfgTimer.current) clearTimeout(cfgTimer.current);
+    setSaveStatus("saving");
+    cfgTimer.current = setTimeout(async function() {
+      try { await spSaveConfig({ bal: bal, balDate: getToday(), emps: emps, tmpls: tmpls }); setSaveStatus("saved"); }
+      catch(e) { console.error('Save config:', e); setSaveStatus("error"); }
+    }, 1500);
+  }, [bal, emps, tmpls, ready]);
+
+  /* ══════ DERIVED DATA ══════ */
+  var td = getToday();
+  var allPayments = useMemo(function() { return Object.values(payments); }, [payments]);
+
+  var actionItems = useMemo(function() {
+    return allPayments.filter(function(p){return p.status===UNPAID && p.dueDate<=td;})
+      .sort(function(a,b){return a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:b.amount-a.amount;});
+  }, [allPayments, td]);
+  var todayItems = useMemo(function(){return actionItems.filter(function(p){return p.dueDate===td;});}, [actionItems,td]);
+  var pastItems = useMemo(function(){return actionItems.filter(function(p){return p.dueDate<td;});}, [actionItems,td]);
+  var pendItems = useMemo(function(){
+    return allPayments.filter(function(p){return p.status===PAID;}).sort(function(a,b){return a.dueDate<b.dueDate?-1:1;});
+  }, [allPayments]);
+  var clrItems = useMemo(function(){
+    return allPayments.filter(function(p){return p.status===CLEARED;}).sort(function(a,b){return a.dueDate>b.dueDate?-1:1;});
+  }, [allPayments]);
+
+  var sum = function(arr,filterExcl){return arr.filter(function(p){return filterExcl?!p.excluded:true;}).reduce(function(s,p){return s+effAmt(p);},0);};
+
+  // Date-filtered totals: when a day is selected, show all unpaid+pending from today through that date
+  var fActionItems = selDay
+    ? allPayments.filter(function(p){return p.status===UNPAID && p.dueDate<=selDay;})
+    : actionItems;
+  var fPendItems = selDay
+    ? allPayments.filter(function(p){return p.status===PAID && p.dueDate<=selDay;})
+    : pendItems;
+  var fClrItems = selDay ? clrItems.filter(function(p){return p.dueDate<=selDay;}) : clrItems;
+
+  var actionTotal = sum(fActionItems,true);
+  var exclTotal = sum(fActionItems.filter(function(p){return p.excluded;}),false);
+  var exclCount = fActionItems.filter(function(p){return p.excluded;}).length;
+  var pendTotal = sum(fPendItems,false);
+  var clrTotal = sum(fClrItems,false);
+  var avail = bal - pendTotal;
+  var gap = actionTotal - avail;
+  var isShort = gap > 0;
+
+  /* ══════ FORECAST (in-memory generation for date range) ══════ */
+  var fcData = useMemo(function() {
+    if (!showFc) return null;
+    var fD = parseD(fcFrom), tD = parseD(fcTo);
+    if (fD > tD) return { err: true };
+    // Use existing payments + generate missing future ones in-memory
+    var inRange = allPayments.filter(function(p) { return p.dueDate >= fcFrom && p.dueDate <= fcTo; });
+    // Also generate expected for months not yet in SP
+    var y = fD.getFullYear(), m = fD.getMonth();
+    while (y < tD.getFullYear() || (y === tD.getFullYear() && m <= tD.getMonth())) {
+      var exp = genExpected(y, m, tmpls, emps);
+      exp.forEach(function(e) { if (!payments[e.id] && e.dueDate >= fcFrom && e.dueDate <= fcTo) inRange.push(e); });
+      m++; if (m > 11) { m = 0; y++; }
+    }
+    var unpaid = inRange.filter(function(p){return p.status===UNPAID && !p.excluded;});
+    var pend = inRange.filter(function(p){return p.status===PAID;});
+    var tDue = unpaid.reduce(function(s,p){return s+effAmt(p);},0);
+    var tPend = pend.reduce(function(s,p){return s+effAmt(p);},0);
+    var total = tDue + tPend;
+    var byDate = {};
+    unpaid.concat(pend).forEach(function(p) {
+      if(!byDate[p.dueDate]) byDate[p.dueDate]={items:[],total:0};
+      byDate[p.dueDate].items.push(p); byDate[p.dueDate].total+=effAmt(p);
+    });
+    var byCat = {};
+    unpaid.concat(pend).forEach(function(p){byCat[p.category]=(byCat[p.category]||0)+effAmt(p);});
+    return {total:total,gap:total-bal,dates:Object.keys(byDate).sort(),byDate:byDate,byCat:byCat,count:unpaid.length+pend.length};
+  }, [showFc,fcFrom,fcTo,allPayments,tmpls,emps,bal,payments]);
+
+  /* ══════ CALENDAR ══════ */
+  var calDays = useMemo(function() {
+    var days = [], dm = daysIn(cy,cm), first = new Date(cy,cm,1).getDay();
+    for(var i=0;i<first;i++) days.push(null);
+    for(var d=1;d<=dm;d++) {
+      var ds = cy+"-"+pad(cm+1)+"-"+pad(d);
+      var monthPay = allPayments.filter(function(p){return p.dueDate===ds;});
+      var due = monthPay.filter(function(p){return p.status===UNPAID;}).reduce(function(s,p){return s+effAmt(p);},0);
+      var cnt = monthPay.filter(function(p){return p.status===UNPAID;}).length;
+      var hp = monthPay.some(function(p){return p.isPayroll && p.status!==CLEARED;});
+      days.push({day:d,ds:ds,due:due,cnt:cnt,hp:hp});
+    }
+    return days;
+  }, [cy,cm,allPayments]);
+
+  var dayItems = useMemo(function() {
+    if (!selDay) return [];
+    return allPayments.filter(function(p) { return p.dueDate === selDay; })
+      .sort(function(a,b) { return a.status === CLEARED ? 1 : b.status === CLEARED ? -1 : a.name < b.name ? -1 : 1; });
+  }, [selDay, allPayments]);
+
+  /* ══════ ACTIONS — optimistic UI + background SP write ══════ */
+  var fieldMap = {PayStatus:'status',CheckNum:'checkNum',PayNote:'note',Excluded:'excluded',UseMin:'useMin',
+    Title:'name',Category:'category',Amount:'amount',DueDate:'dueDate',AutoPay:'autoPay',MinPay:'minPay',CloseDate:'closeDate'};
+
+  function spFieldsToJs(fields) {
+    var js = {};
+    Object.keys(fields).forEach(function(k) { if (fieldMap[k]) js[fieldMap[k]] = fields[k]; });
+    return js;
+  }
+
+  function spUpdate(id, fields) {
+    var p = payments[id];
+    if (!p || !p._spId) { console.error('No SP ID for', id); return; }
+    // Optimistic: update local state immediately
+    setPayments(function(prev) {
+      var n = Object.assign({}, prev);
+      n[id] = Object.assign({}, n[id], spFieldsToJs(fields));
+      return n;
+    });
+    // Write to SP in background
+    setSaveStatus("saving");
+    spUpdatePay(p._spId, fields).then(function() {
+      setSaveStatus("saved");
+    }).catch(function(e) {
+      console.error('Update:', e);
+      setSaveStatus("error");
+    });
+  }
+
+  function markPaid(id) { spUpdate(id, { PayStatus: PAID }); }
+  function markCleared(id) { spUpdate(id, { PayStatus: CLEARED }); }
+  function markUnpaid(id) { spUpdate(id, { PayStatus: UNPAID, CheckNum: '' }); }
+  function toggleExcl(id) {
+    var p = payments[id];
+    if (p) spUpdate(id, { Excluded: !p.excluded });
+  }
+  function toggleMin(id) {
+    var p = payments[id];
+    if (p) spUpdate(id, { UseMin: !p.useMin });
+  }
+  function delPay(id) {
+    var p = payments[id];
+    if (!p || !p._spId) return;
+    // Optimistic: remove from state immediately
+    setPayments(function(prev) { var n = Object.assign({}, prev); delete n[id]; return n; });
+    setSaveStatus("saving");
+    spDeletePay(p._spId).then(function() { setSaveStatus("saved"); })
+      .catch(function(e) { console.error('Delete:', e); setSaveStatus("error"); });
+  }
+  function delTmpl(name) { setTmpls(function(p){return p.filter(function(t){return t.name!==name;});}); }
+
+  function addPay() {
+    if (!form.name || !form.amount) return;
+    var isCC = form.category === "Credit Card";
+    if (form.isRecurring) {
+      if (!form.dayOfMonth) return;
+      setTmpls(function(prev) {
+        return prev.concat([{
+          name:form.name,category:form.category,amount:parseFloat(form.amount),
+          dayOfMonth:parseInt(form.dayOfMonth),autoPay:form.autoPay,varies:!form.sameAmount,
+          minPay:isCC&&form.minPay?parseFloat(form.minPay):0,
+          closeDay:isCC&&form.closeDay?parseInt(form.closeDay):0,
+          startDate:getToday(),endDate:""
+        }]);
+      });
+    } else {
+      if (!form.dueDate) return;
+      var newP = {
+        id:"ot-"+Date.now()+"-"+Math.random().toString(36).slice(2,6),
+        name:form.name,category:form.category,amount:parseFloat(form.amount),
+        minPay:isCC&&form.minPay?parseFloat(form.minPay):0,
+        closeDate:isCC&&form.closeDay?form.dueDate.slice(0,8)+pad(parseInt(form.closeDay)):"",
+        useMin:false,dueDate:form.dueDate,autoPay:form.autoPay,
+        status:UNPAID,checkNum:"",isPayroll:false,varies:false,excluded:false,note:form.note||""
+      };
+      // Optimistic: add to state immediately
+      setPayments(function(prev) { var n = Object.assign({}, prev); n[newP.id] = newP; return n; });
+      // Create in SP in background
+      setSaveStatus("saving");
+      spCreatePay(newP).then(function(spId) {
+        newP._spId = spId;
+        setPayments(function(prev) { var n = Object.assign({}, prev); n[newP.id] = Object.assign({}, n[newP.id], { _spId: spId }); return n; });
+        setSaveStatus("saved");
+      }).catch(function(e) { console.error('Add:', e); setSaveStatus("error"); });
+    }
+    setForm({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true});
+    setShowAdd(false);
+  }
+
+  function addRec() {
+    if (!recF.name||!recF.amount||!recF.dayOfMonth) return;
+    var isCC = recF.category === "Credit Card";
+    setTmpls(function(prev) {
+      return prev.concat([{
+        name:recF.name,category:recF.category,amount:parseFloat(recF.amount),
+        dayOfMonth:parseInt(recF.dayOfMonth),autoPay:recF.autoPay,varies:recF.varies,
+        minPay:isCC&&recF.minPay?parseFloat(recF.minPay):0,
+        closeDay:isCC&&recF.closeDay?parseInt(recF.closeDay):0,
+        startDate:recF.startDate||getToday(),
+        endDate:recF.endDate||""
+      }]);
+    });
+    setRecF({name:"",category:"Credit Card",amount:"",dayOfMonth:"1",autoPay:false,varies:true,minPay:"",closeDay:"",startDate:getToday(),endDate:""});
+    setShowRec(false);
+  }
+
+  function remTmpl(name) { setTmpls(function(prev){return prev.filter(function(t){return t.name!==name;});}); }
+
+  function openEditTmpl(idx) {
+    var t = tmpls[idx];
+    setEditTmplIdx(idx);
+    setEditTmplF({
+      name:t.name, category:t.category, amount:String(t.amount),
+      dayOfMonth:String(t.dayOfMonth), autoPay:t.autoPay, varies:t.varies||false,
+      minPay:t.minPay?String(t.minPay):"", closeDay:t.closeDay?String(t.closeDay):"",
+      startDate:t.startDate||"", endDate:t.endDate||""
+    });
+  }
+  function saveEditTmpl() {
+    if (!editTmplF || editTmplIdx === null) return;
+    var isCC = editTmplF.category === "Credit Card";
+    setTmpls(function(prev) {
+      var n = prev.slice();
+      n[editTmplIdx] = {
+        name:editTmplF.name, category:editTmplF.category, amount:parseFloat(editTmplF.amount),
+        dayOfMonth:parseInt(editTmplF.dayOfMonth), autoPay:editTmplF.autoPay, varies:editTmplF.varies,
+        minPay:isCC&&editTmplF.minPay?parseFloat(editTmplF.minPay):0,
+        closeDay:isCC&&editTmplF.closeDay?parseInt(editTmplF.closeDay):0,
+        startDate:editTmplF.startDate||"", endDate:editTmplF.endDate||"",
+        stmtUpdated: prev[editTmplIdx].stmtUpdated || ""
+      };
+      return n;
+    });
+    setEditTmplIdx(null); setEditTmplF(null);
+  }
+
+  var [ccUpdateIdx, setCcUpdateIdx] = useState(null);
+  var [ccNewAmt, setCcNewAmt] = useState("");
+  var [ccNewMin, setCcNewMin] = useState("");
+  var [ccDismissed, setCcDismissed] = useState({});  // { tmplName: true }
+
+  // CC statement alert: find credit cards where close day has passed this month and statement not yet updated
+  var ccAlerts = useMemo(function() {
+    var today = getToday();
+    var todayD = parseD(today);
+    var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
+    return tmpls.map(function(t, idx) {
+      if (t.category !== "Credit Card" || !t.closeDay) return null;
+      var dm = daysIn(todayD.getFullYear(), todayD.getMonth());
+      var closeDay = Math.min(t.closeDay, dm);
+      var closeDate = curMk + "-" + pad(closeDay);
+      if (today < closeDate) return null; // close day hasn't passed yet
+      if (t.stmtUpdated === curMk) return null; // already updated this month
+      if (ccDismissed[t.name]) return null; // dismissed this session
+      return { idx: idx, name: t.name, closeDate: closeDate };
+    }).filter(Boolean);
+  }, [tmpls, ccDismissed]);
+
+  function updateCcStatement(idx) {
+    if (!ccNewAmt) return;
+    var todayD = parseD(getToday());
+    var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
+    var tName = tmpls[idx].name;
+    setTmpls(function(prev) {
+      var n = prev.slice();
+      n[idx] = Object.assign({}, n[idx], {
+        amount: parseFloat(ccNewAmt),
+        minPay: ccNewMin ? parseFloat(ccNewMin) : n[idx].minPay,
+        stmtUpdated: curMk
+      });
+      return n;
+    });
+    // Also update the current month's payment row if it exists
+    var t = tmpls[idx];
+    var mk = curMk;
+    var payId = "r-" + mk + "-" + t.name;
+    if (payments[payId]) {
+      var fields = { Amount: parseFloat(ccNewAmt) };
+      if (ccNewMin) fields.MinPay = parseFloat(ccNewMin);
+      spUpdate(payId, fields);
+    }
+    setCcDismissed(function(prev) { var n = Object.assign({}, prev); n[tName] = true; return n; });
+    setCcUpdateIdx(null); setCcNewAmt(""); setCcNewMin("");
+  }
+
+  function dismissCcAlert(idx) {
+    var todayD = parseD(getToday());
+    var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
+    var tName = tmpls[idx].name;
+    setTmpls(function(prev) {
+      var n = prev.slice();
+      n[idx] = Object.assign({}, n[idx], { stmtUpdated: curMk });
+      return n;
+    });
+    setCcDismissed(function(prev) { var n = Object.assign({}, prev); n[tName] = true; return n; });
+  }
+
+  function openEdit(p) {
+    setEditId(p.id);
+    setForm({name:p.name,category:p.category,amount:String(p.amount),dueDate:p.dueDate,autoPay:p.autoPay,checkNum:p.checkNum||"",note:p.note||"",minPay:p.minPay?String(p.minPay):"",closeDay:p.closeDate?String(parseInt(p.closeDate.slice(-2))):""});
+  }
+
+  function saveEdit() {
+    var isCC = form.category === "Credit Card";
+    var fields = {
+      Title: form.name, Category: form.category, Amount: parseFloat(form.amount),
+      DueDate: form.dueDate, AutoPay: form.autoPay, CheckNum: form.checkNum || "",
+      PayNote: form.note || "",
+      MinPay: isCC && form.minPay ? parseFloat(form.minPay) : 0,
+      CloseDate: isCC && form.closeDay ? form.dueDate.slice(0,8)+pad(parseInt(form.closeDay)) : "",
+      MonthKey: form.dueDate.substring(0,7)
+    };
+    spUpdate(editId, fields);
+    setEditId(null);
+  }
+
+  function addEmp() {
+    if(!empF.name||!empF.salary) return;
+    setEmps(function(p){return p.concat([{name:empF.name,salary:parseFloat(empF.salary),startDate:empF.startDate||getToday(),pauseFrom:"",pauseTo:""}]);});
+    setEmpF({name:"",salary:"",startDate:getToday()});
+  }
+  function remEmp(n) { setEmps(function(p){return p.filter(function(e){return e.name!==n;});}); }
+  function pauseEmp(n, from, to) {
+    setEmps(function(p){return p.map(function(e){return e.name===n?Object.assign({},e,{pauseFrom:from,pauseTo:to}):e;});});
+  }
+  function unpauseEmp(n) {
+    setEmps(function(p){return p.map(function(e){return e.name===n?Object.assign({},e,{pauseFrom:"",pauseTo:""}):e;});});
+  }
+  var [pauseEmpName, setPauseEmpName] = useState(null);
+  var [pauseFrom, setPauseFrom] = useState(getToday());
+  var [pauseTo, setPauseTo] = useState("");
+  function saveChk(id) { spUpdate(id, { CheckNum: chkIn }); setCheckId(null); setChkIn(""); }
+  function saveNote(id) { spUpdate(id, { PayNote: noteIn }); setNoteId(null); setNoteIn(""); }
+  function saveBal() { var v=parseFloat(balIn.replace(/,/g,"")); if(!isNaN(v)) setBal(v); setEditBal(false); }
+  function navMo(dir) { var m=cm+dir,y=cy; if(m>11){m=0;y++;} if(m<0){m=11;y--;} setCm(m);setCy(y);setSelDay(null); }
+
+  // Multi-select helpers
+  function toggleSel(id) { setSelected(function(prev) { var n = Object.assign({}, prev); if (n[id]) delete n[id]; else n[id] = true; return n; }); }
+  var selIds = Object.keys(selected);
+  var selCount = selIds.length;
+
+  function selAll(items) {
+    var s = {};
+    items.forEach(function(p) { s[p.id] = true; });
+    setSelected(s);
+  }
+  function selNone() { setSelected({}); }
+
+  function bulkPaid() {
+    if (!confirm("Mark " + selCount + " items as Paid?")) return;
+    selIds.forEach(function(id) { markPaid(id); });
+    setSelected({});
+  }
+  function bulkCleared() {
+    if (!confirm("Mark " + selCount + " items as Cleared?")) return;
+    selIds.forEach(function(id) { markCleared(id); });
+    setSelected({});
+  }
+  function bulkDelete() {
+    if (!confirm("DELETE " + selCount + " items? This cannot be undone.")) return;
+    selIds.forEach(function(id) { delPay(id); });
+    setSelected({});
+  }
+  function bulkUnpaid() {
+    if (!confirm("Move " + selCount + " items back to Unpaid?")) return;
+    selIds.forEach(function(id) { markUnpaid(id); });
+    setSelected({});
+  }
+
+  async function doRefresh() {
+    setSaveStatus("saving");
+    try { var m = await spLoadAllPay(); setPayments(m); setSaveStatus("saved"); }
+    catch(e) { console.error('Refresh:', e); setSaveStatus("error"); }
+  }
+
+  async function resetAllData() {
+    if (!confirm("⚠️ DELETE ALL payment rows and templates?\n\nThis will:\n• Delete ALL payment rows from SharePoint\n• Clear all recurring templates\n• Clear all employees\n• Reset balance to 0\n\nYou can then set up your own data from scratch.\n\nThis cannot be undone!")) return;
+    setSaveStatus("saving");
+    try {
+      // Delete all payment rows from SP
+      var items = await getAllItems(SP.payListId);
+      for (var i = 0; i < items.length; i++) {
+        try { await spDeletePay(items[i].id); } catch(e) {}
+      }
+      // Clear local state
+      setPayments({});
+      setTmpls([]);
+      setEmps([]);
+      setBal(0);
+      setBalIn("0");
+      // Save empty config
+      await spSaveConfig({ bal: 0, balDate: '', emps: [], tmpls: [] });
+      setSaveStatus("saved");
+      alert("✅ All data cleared! You can now add your own templates, employees, and payments.");
+    } catch(e) { console.error('Reset:', e); setSaveStatus("error"); }
+  }
+
+  /* ════ UI starts here ════ */
+  function Row({ p, sec, idx }) {
+    var cat = CATS[p.category] || CATS.Other;
+    var isPast = p.dueDate < td && p.status === UNPAID;
+    var isExcl = p.excluded && sec === "action";
+    var isCC = p.category === "Credit Card";
+    var amt = effAmt(p);
+    var stripe = idx % 2 === 0 ? "white" : "#f9fafb";
+
+    return (
+      <div style={{
+        background: isExcl ? "#f1f5f9" : stripe,
+        padding: "14px 16px",
+        borderBottom: "1px solid #e5e7eb",
+        borderLeft: isPast && !isExcl ? "3px solid #ef4444" : "3px solid transparent",
+        display: "flex", alignItems: "flex-start", gap: 10,
+        opacity: isExcl ? 0.5 : 1
+      }}>
+        {/* Multi-select checkbox */}
+        <input type="checkbox" checked={!!selected[p.id]} onChange={function() { toggleSel(p.id); }} style={{
+          width: 18, height: 18, flexShrink: 0, marginTop: 4, cursor: "pointer", accentColor: "#3b82f6"
+        }} />
+        {/* Status button */}
+        {sec === "action" && (
+          <button onClick={function() { markPaid(p.id); }} style={{
+            width: 26, height: 26, borderRadius: 6, flexShrink: 0, marginTop: 2,
+            border: "2px solid #93c5fd", background: "#eff6ff",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#60A5FA", fontSize: 13, fontWeight: 700
+          }}>$</button>
+        )}
+        {sec === "pending" && (
+          <button onClick={function() { markCleared(p.id); }} style={{
+            width: 26, height: 26, borderRadius: 6, flexShrink: 0, marginTop: 2,
+            border: "2px solid #6ee7b7", background: "#ecfdf5",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#059669", fontSize: 12, fontWeight: 700
+          }}>✓</button>
+        )}
+        {sec === "cleared" && (
+          <div style={{
+            width: 26, height: 26, borderRadius: 6, flexShrink: 0, marginTop: 2,
+            background: "linear-gradient(135deg,#10B981,#059669)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#fff", fontSize: 12, fontWeight: 700
+          }}>✓</div>
+        )}
+
+        <div style={{ width: 6, height: 6, borderRadius: "50%", background: cat.dot, flexShrink: 0, marginTop: 7 }} />
+
+        {/* Info */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{
+            fontSize: 15, fontWeight: 600,
+            color: sec === "cleared" || isExcl ? "#94a3b8" : "#111827",
+            textDecoration: sec === "cleared" || isExcl ? "line-through" : "none",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
+          }}>{p.name}</div>
+
+          <div style={{ display: "flex", gap: 4, marginTop: 2, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: cat.bg, color: cat.tx }}>{p.category}</span>
+            {p.autoPay && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(59,130,246,.1)", color: "#60A5FA" }}>Auto-Pay</span>}
+            {p.checkNum && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(16,185,129,.1)", color: "#059669", fontFamily: "'JetBrains Mono',monospace" }}>Chk #{p.checkNum}</span>}
+            {isPast && !isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
+            {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
+            {isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped</span>}
+          </div>
+
+          {/* CC info */}
+          {isCC && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 3 }}>
+              {p.closeDate && <span style={{ fontSize: 11, color: "#94a3b8" }}>Closes {fmtS(p.closeDate)}</span>}
+              {p.minPay > 0 && (
+                <button onClick={function(e) { e.stopPropagation(); toggleMin(p.id); }} style={{
+                  fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, cursor: "pointer", border: "none",
+                  background: p.useMin ? "rgba(245,158,11,.15)" : "rgba(148,163,184,.08)",
+                  color: p.useMin ? "#F59E0B" : "#64748B"
+                }}>
+                  {p.useMin ? "Min " + fmt(p.minPay) + " ✓" : "Min " + fmt(p.minPay)}
+                </button>
+              )}
+              <span style={{ fontSize: 9, fontWeight: 600, color: p.useMin ? "#64748B" : "#93C5FD", padding: "1px 6px", borderRadius: 4, background: p.useMin ? "transparent" : "rgba(59,130,246,.08)" }}>
+                Stmt: {fmt(p.amount)}
+              </span>
+            </div>
+          )}
+
+          {/* Note preview */}
+          {p.note && (
+            <div style={{ marginTop: 3, fontSize: 11, color: "#6b7280", fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 350 }}>
+              📝 {p.note}
+            </div>
+          )}
+        </div>
+
+        {/* Amount */}
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{
+            fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace",
+            color: sec === "cleared" || isExcl ? "#94a3b8" : "#111827",
+            textDecoration: sec === "cleared" || isExcl ? "line-through" : "none"
+          }}>{fmt(amt)}</div>
+          {isCC && p.useMin && <div style={{ fontSize: 11, color: "#d97706" }}>min pmt</div>}
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
+          <button onClick={function() { setNoteId(p.id); setNoteIn(p.note || ""); }} title="Note" style={smBtn(p.note ? "#f3e8ff" : "#f1f5f9", p.note ? "#7c3aed" : "#64748b")}>📝</button>
+          {sec === "action" && (
+            <button onClick={function() { toggleExcl(p.id); }} title={p.excluded ? "Include" : "Skip"} style={smBtn(p.excluded ? "#dbeafe" : "#f1f5f9", p.excluded ? "#2563eb" : "#64748b")}>{p.excluded ? "↩️" : "⏭️"}</button>
+          )}
+          {p.isPayroll && !p.checkNum && sec !== "cleared" && (
+            <button onClick={function() { setCheckId(p.id); setChkIn(""); }} title="Check #" style={smBtn("#d1fae5", "#059669")}>#️⃣</button>
+          )}
+          <button onClick={function() { openEdit(p); }} title="Edit" style={smBtn("#dbeafe", "#2563eb")}>✏️</button>
+          {sec === "pending" && <button onClick={function() { markUnpaid(p.id); }} title="Undo to Unpaid" style={smBtn("#fef3c7", "#d97706")}>↩️</button>}
+          {sec === "cleared" && <button onClick={function() { markPaid(p.id); }} title="Undo to Pending" style={smBtn("#fef3c7", "#d97706")}>↩️</button>}
+          {sec !== "cleared" && <button onClick={function() { if (confirm("Delete " + p.name + "?")) delPay(p.id); }} title="Delete" style={smBtn("#fee2e2", "#dc2626")}>🗑️</button>}
+        </div>
+      </div>
+    );
+  }
+
+  /* ── CC fields for forms ── */
+  function CCFields({ f, setF }) {
+    if (f.category !== "Credit Card") return null;
+    return (
+      <div style={{ padding: "9px 11px", background: "#FFFBEB", borderRadius: 8, border: "1px solid #FDE68A", background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "#92400E" }}>💳 Credit Card Details</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <div>
+            <Label text="Min Payment ($)" />
+            <input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace", borderColor: "#FDE68A" })} type="number" step=".01" value={f.minPay} onChange={function(e) { setF(Object.assign({}, f, { minPay: e.target.value })); }} placeholder="e.g. 85" />
+          </div>
+          <div>
+            <Label text="Statement Close Day" />
+            <input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace", borderColor: "#FDE68A" })} type="number" min="1" max="31" value={f.closeDay} onChange={function(e) { setF(Object.assign({}, f, { closeDay: e.target.value })); }} placeholder="e.g. 8" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!ready) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0F172A", color: "#64748B", fontFamily: "'DM Sans',sans-serif" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 28 }}>◈</div>
+          <div style={{ marginTop: 8 }}>Loading…</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", padding: 24, maxWidth: 1400, margin: "0 auto" }}>
+      <style>{`
+        *{box-sizing:border-box;margin:0;padding:0}
+        input,select,button,textarea{font-family:inherit}
+      `}</style>
+
+      {/* Header */}
+      <header style={{ background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", color: "white", padding: "20px 28px", borderRadius: 12, marginBottom: 24, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ width: 36, height: 36, borderRadius: 9, background: "linear-gradient(135deg,#3B82F6,#8B5CF6)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700 }}>$</span>
+            OpsPay
+          </h1>
+          <p style={{ margin: "4px 0 0", opacity: 0.8, fontSize: 13 }}>Payment Operations Dashboard</p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 14, opacity: 0.9 }}>Welcome, {userName}</span>
+          <button onClick={function() { setShowEmp(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>👥 Employees</button>
+          <button onClick={function() { setShowRec(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>⟳ Recurring</button>
+          <button onClick={function() { setShowFc(!showFc); }} style={{ padding: "8px 14px", background: showFc ? "rgba(139,92,246,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showFc ? 600 : 400 }}>📊 Forecast</button>
+          <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
+          <button onClick={function() { setSaveStatus("saving"); spLoadAllPay().then(function(m) { setPayments(m); setSaveStatus("saved"); }).catch(function() { setSaveStatus("error"); }); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
+          <button onClick={function() { if(confirm("Sign out of OpsPay?")) { var a = msalInstance.getAllAccounts(); if(a.length) { msalInstance.logoutPopup({ account: a[0] }).then(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }).catch(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }); } else { localStorage.clear(); sessionStorage.clear(); location.reload(); } }}} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Sign Out</button>
+        </div>
+      </header>
+
+      <div>
+
+        {/* CC Statement Alerts */}
+        {ccAlerts.map(function(a) {
+          return (
+            <div key={a.idx} style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "10px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 20 }}>💳</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#92400e" }}>{a.name} — Statement Ready</div>
+                <div style={{ fontSize: 11, color: "#a16207" }}>Statement closed {fmtS(a.closeDate)}. Please enter new balance & min payment.</div>
+              </div>
+              {ccUpdateIdx === a.idx ? (
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <input value={ccNewAmt} onChange={function(e){setCcNewAmt(e.target.value);}} placeholder="New balance" type="number" step=".01" style={{ width: 110, padding: "6px 8px", borderRadius: 6, border: "1.5px solid #fde68a", fontSize: 12, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} />
+                  <input value={ccNewMin} onChange={function(e){setCcNewMin(e.target.value);}} placeholder="Min due" type="number" step=".01" style={{ width: 90, padding: "6px 8px", borderRadius: 6, border: "1.5px solid #fde68a", fontSize: 12, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} />
+                  <button onClick={function(){updateCcStatement(a.idx);}} style={{ background: "#f59e0b", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Update</button>
+                  <button onClick={function(){setCcUpdateIdx(null);}} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 8px", fontSize: 11, cursor: "pointer", color: "#6b7280" }}>✕</button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={function(){setCcUpdateIdx(a.idx);setCcNewAmt("");setCcNewMin("");}} style={{ background: "#f59e0b", color: "white", border: "none", borderRadius: 6, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Update Statement</button>
+                  <button onClick={function(){dismissCcAlert(a.idx);}} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 10px", fontSize: 11, cursor: "pointer", color: "#6b7280" }}>Dismiss</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Summary */}
+        {selDay && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "6px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#1e40af" }}>📅 Funding needed through: {fmtS(selDay)} ({dayN(selDay)})</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={function() { setSelDay(null); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 16, marginBottom: 24 }}>
+          <div style={cardS}>
+            <div style={lblS}>Account Balance</div>
+            {editBal ? (
+              <div style={{ display: "flex", gap: 4 }}>
+                <input value={balIn} onChange={function(e) { setBalIn(e.target.value); }} onKeyDown={function(e) { if (e.key === "Enter") saveBal(); }} autoFocus style={{ background: "white", border: "2px solid #3b82f6", borderRadius: 8, padding: "4px 10px", color: "#0f172a", fontSize: 22, fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, width: "100%", outline: "none" }} />
+                <button onClick={saveBal} style={{ background: "#3b82f6", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>✓</button>
+              </div>
+            ) : (
+              <div onClick={function() { setBalIn(String(bal)); setEditBal(true); }} style={Object.assign({}, numS, { cursor: "pointer" })}>{fmt(bal)}</div>
+            )}
+            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>Click to update</div>
+          </div>
+
+          <div style={Object.assign({}, cardS, { borderLeft: "4px solid #f59e0b" })}>
+            <div style={lblS}>Available (After Pending)</div>
+            <div style={Object.assign({}, numS, { color: avail >= 0 ? "#F59E0B" : "#EF4444" })}>{fmt(avail)}</div>
+            {pendTotal > 0 && <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fmt(pendTotal)} clearing</div>}
+          </div>
+
+          <div style={Object.assign({}, cardS, { borderLeft: "4px solid #ef4444" })}>
+            <div style={lblS}>Funding Needed</div>
+            <div style={Object.assign({}, numS, { color: actionTotal > 0 ? "#dc2626" : "#10B981" })}>{fmt(actionTotal)}</div>
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fActionItems.filter(function(p) { return !p.excluded; }).length} items{exclCount > 0 ? " · " + exclCount + " skipped" : ""}</div>
+          </div>
+
+          <div style={Object.assign({}, cardS, { borderLeft: isShort ? "4px solid #dc2626" : "4px solid #10b981" })}>
+            <div style={lblS}>{isShort ? "⚠ Shortfall" : "✓ Covered"}</div>
+            <div style={Object.assign({}, numS, { color: isShort ? "#dc2626" : "#059669" })}>{isShort ? "−" + fmt(gap) : fmt(avail - actionTotal)}</div>
+            {isShort && <div style={{ fontSize: 13, color: "#991b1b", marginTop: 4, fontWeight: 600 }}>Need {fmt(gap)} more</div>}
+          </div>
+        </div>
+
+        {/* Forecast */}
+        {showFc && (
+          <div style={{ background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 12, padding: 16, border: "1px solid #e2e8f0", marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#A78BFA" }}>📊 Funding Forecast</div>
+              <button onClick={function() { setShowFc(false); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", cursor: "pointer", color: "#374151", fontSize: 11 }}>Close</button>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div><Label text="From" /><input type="date" value={fcFrom} onChange={function(e) { setFcFrom(e.target.value); }} style={Object.assign({}, inputS, { background: "white", color: "#111827", border: "1px solid #d1d5db", width: 155 })} /></div>
+              <div><Label text="To" /><input type="date" value={fcTo} onChange={function(e) { setFcTo(e.target.value); }} style={Object.assign({}, inputS, { background: "white", color: "#111827", border: "1px solid #d1d5db", width: 155 })} /></div>
+              <div style={{ display: "flex", gap: 4 }}>
+                {[7, 14, 30, 60, 90].map(function(d) {
+                  return <button key={d} onClick={function() { setFcFrom(getToday()); var nd = new Date(); nd.setDate(nd.getDate() + d); setFcTo(toISO(nd)); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#374151", fontSize: 10, fontWeight: 600 }}>{d}d</button>;
+                })}
+              </div>
+            </div>
+            {fcData && !fcData.err && (
+              <div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 8, marginBottom: 14 }}>
+                  <div style={{ background: "#f8fafc", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", marginBottom: 2 }}>Total Due</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a" }}>{fmt(fcData.total)}</div>
+                    <div style={{ fontSize: 11, color: "#64748b", marginTop: 1 }}>{fcData.count} payments</div>
+                  </div>
+                  <div style={{ background: "#f8fafc", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", marginBottom: 2 }}>Balance</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#93C5FD" }}>{fmt(bal)}</div>
+                  </div>
+                  <div style={{ background: fcData.gap > 0 ? "rgba(127,29,29,.2)" : "rgba(6,78,59,.2)", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", marginBottom: 2 }}>{fcData.gap > 0 ? "Gap" : "Surplus"}</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: fcData.gap > 0 ? "#EF4444" : "#10B981" }}>{fcData.gap > 0 ? "−" + fmt(fcData.gap) : fmt(Math.abs(fcData.gap))}</div>
+                  </div>
+                </div>
+                <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+                  {fcData.dates.map(function(date) {
+                    var d = fcData.byDate[date];
+                    return (
+                      <div key={date} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 9px", borderRadius: 6, background: "#f8fafc" }}>
+                        <div style={{ width: 75, flexShrink: 0, fontSize: 11, fontWeight: 600, color: date === td ? "#93C5FD" : "#CBD5E1" }}>{date === td ? "Today" : fmtS(date)}</div>
+                        <div style={{ flex: 1, fontSize: 10, color: "#64748B" }}>{d.items.length} items</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a" }}>{fmt(d.total)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Date bar */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+          <button onClick={function() { setShowCal(!showCal); }} style={{ background: showCal ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 7px", cursor: "pointer", display: "flex", alignItems: "center" }}>
+            <CalIcon size={16} color={showCal ? "#60A5FA" : "#94A3B8"} />
+          </button>
+          <span style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>Today</span>
+          <span style={{ fontSize: 12, color: "#64748B" }}>{fmtS(td)} · {dayN(td)}</span>
+        </div>
+
+        {/* Calendar */}
+        {showCal && (
+          <div style={{ background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 11, padding: 12, border: "1px solid #e5e7eb", marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <button onClick={function() { navMo(-1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>‹</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>{MONTHS[cm]} {cy}</span>
+                <button onClick={function() { var t = new Date(); setCy(t.getFullYear()); setCm(t.getMonth()); setShowCal(false); }} style={{ background: "rgba(59,130,246,.1)", border: "none", borderRadius: 4, padding: "2px 7px", color: "#60A5FA", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>Today</button>
+              </div>
+              <button onClick={function() { navMo(1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>›</button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2, marginBottom: 2 }}>
+              {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(function(d) { return <div key={d} style={{ textAlign: "center", fontSize: 10, fontWeight: 600, color: "#6b7280", padding: "4px 0" }}>{d}</div>; })}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2 }}>
+              {calDays.map(function(c, i) {
+                if (!c) return <div key={"e" + i} />;
+                var isT = c.ds === td;
+                var isSel = c.ds === selDay;
+                return (
+                  <button key={c.ds} onClick={function() { setSelDay(isSel ? null : c.ds); }} style={{
+                    background: isSel ? "#eff6ff" : c.due > 0 ? "white" : "#f8fafc",
+                    border: isSel ? "2px solid #2563eb" : isT ? "2px solid #3b82f6" : "1px solid #e5e7eb",
+                    borderRadius: 6, padding: "3px 2px", cursor: "pointer", textAlign: "center", minHeight: 44,
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", gap: 1
+                  }}>
+                    <div style={{ fontSize: 10, fontWeight: isT || isSel ? 700 : 500, color: isSel ? "#2563eb" : isT ? "#60A5FA" : "#CBD5E1" }}>{c.day}</div>
+                    {c.due > 0 && <div style={{ fontSize: 8, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: c.due > avail ? "#dc2626" : "#94A3B8" }}>{c.due >= 1000 ? "$" + (c.due / 1000).toFixed(1) + "k" : fmt(c.due)}</div>}
+                    {c.hp && <div style={{ width: 4, height: 4, borderRadius: "50%", background: "#3B82F6" }} />}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Selected day detail */}
+            {selDay && (
+              <div style={{ marginTop: 10, borderTop: "1px solid #e5e7eb", paddingTop: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1e40af" }}>{fmtS(selDay)}</span>
+                    <span style={{ fontSize: 12, color: "#64748b" }}>{dayN(selDay)}</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a" }}>{fmt(dayItems.reduce(function(s,p){return s+effAmt(p);},0))}</span>
+                    <span style={{ fontSize: 11, color: "#94a3b8" }}>{dayItems.length} items</span>
+                    <button onClick={function() { selAll(dayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                    <button onClick={function() { setSelDay(null); }} style={{ background: "#f1f5f9", border: "none", borderRadius: 4, padding: "2px 6px", cursor: "pointer", color: "#64748b", fontSize: 11 }}>✕</button>
+                  </div>
+                </div>
+                {dayItems.length === 0 ? (
+                  <div style={{ padding: 16, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>No payments on this day</div>
+                ) : (
+                  <div style={{ borderRadius: 8, overflow: "hidden", border: "1px solid #e5e7eb" }}>
+                    {dayItems.map(function(p, i) {
+                      var sec = p.status === CLEARED ? "cleared" : p.status === PAID ? "pending" : "action";
+                      return <Row key={p.id} p={p} sec={sec} idx={i} />;
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+          </div>
+        )}
+        {selCount > 0 && (
+          <div style={{ background: "linear-gradient(135deg,#1e40af,#3b82f6)", borderRadius: 10, padding: "10px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ color: "white", fontSize: 13, fontWeight: 600 }}>{selCount} selected</span>
+            <span style={{ color: "#93c5fd", fontSize: 14, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", background: "rgba(255,255,255,0.15)", padding: "3px 10px", borderRadius: 6 }}>{fmt(selIds.reduce(function(s,id){var p=payments[id];return s+(p?effAmt(p):0);},0))}</span>
+            <div style={{ flex: 1 }} />
+            {tab === "action" && <button onClick={bulkPaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>💰 Mark Paid</button>}
+            {tab === "pending" && <button onClick={bulkCleared} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✓ Mark Cleared</button>}
+            {tab === "pending" && <button onClick={bulkUnpaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Undo to Unpaid</button>}
+            {tab === "cleared" && <button onClick={bulkUnpaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Undo</button>}
+            <button onClick={bulkDelete} style={{ background: "rgba(239,68,68,0.3)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>🗑️ Delete</button>
+            <button onClick={selNone} style={{ background: "rgba(255,255,255,0.15)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ Clear</button>
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div style={{ display: "flex", background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 9, padding: 3, marginBottom: 12, border: "1px solid #e5e7eb" }}>
+          {[
+            { k: "action", l: "Action Needed", n: actionItems.filter(function(p) { return !p.excluded; }).length, c: "#dc2626" },
+            { k: "pending", l: "Pending Clear", n: pendItems.length, c: "#F59E0B" },
+            { k: "cleared", l: "Cleared", n: clrItems.length, c: "#10B981" }
+          ].map(function(t) {
+            return (
+              <button key={t.k} onClick={function() { setTab(t.k); setSelected({}); }} style={{
+                flex: 1, padding: "9px 4px", borderRadius: 7, border: "none",
+                background: tab === t.k ? "#0f172a" : "transparent",
+                color: tab === t.k ? "white" : "#374151", fontSize: 12, fontWeight: 600,
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 4
+              }}>
+                <span>{t.l}</span>
+                {t.n > 0 && <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 10, background: tab === t.k ? t.c : "rgba(148,163,184,.12)", color: tab === t.k ? "#fff" : "#94A3B8", minWidth: 18, textAlign: "center" }}>{t.n}</span>}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Action tab */}
+        {tab === "action" && (
+          <div>
+            {actionItems.length === 0 && <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>✓</div><div style={{ fontSize: 14, fontWeight: 600 }}>All caught up!</div></div>}
+            {exclCount > 0 && <div style={{ padding: "6px 10px", background: "#f1f5f9", borderRadius: 8, marginBottom: 10, fontSize: 11, color: "#94A3B8" }}>{exclCount} skipped ({fmt(exclTotal)}) — not in funding total</div>}
+            {pastItems.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#EF4444" }} />
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "#dc2626" }}>Past Due</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#991b1b" }}>{fmt(sum(pastItems.filter(function(p) { return !p.excluded; }), false))}</span>
+                  <div style={{ flex: 1 }} />
+                  <button onClick={function() { selAll(pastItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                </div>
+                <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+                  {pastItems.map(function(p, i) { return <Row key={p.id} p={p} sec="action" idx={i} />; })}
+                </div>
+              </div>
+            )}
+            {todayItems.length > 0 && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#3B82F6" }} />
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "#1e40af" }}>Due Today</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#2563eb" }}>{fmt(sum(todayItems.filter(function(p) { return !p.excluded; }), false))}</span>
+                  <div style={{ flex: 1 }} />
+                  <button onClick={function() { selAll(todayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                </div>
+                <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+                  {todayItems.map(function(p, i) { return <Row key={p.id} p={p} sec="action" idx={i} />; })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Pending tab */}
+        {tab === "pending" && (
+          <div>
+            {pendItems.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>🏦</div><div style={{ fontSize: 14, fontWeight: 600 }}>No pending items</div></div>
+            ) : (
+              <div>
+                <div style={{ padding: "6px 10px", background: "#fffbeb", borderRadius: 8, marginBottom: 10, display: "flex", justifyContent: "space-between", flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: "#F59E0B", fontWeight: 600 }}>Pending: {fmt(pendTotal)}</span>
+                  <span style={{ fontSize: 11, color: "#94A3B8" }}>Available: {fmt(avail)}</span>
+                  <button onClick={function() { selAll(pendItems); }} style={{ background: "none", border: "none", color: "#f59e0b", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                </div>
+                <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+                  {pendItems.map(function(p, i) { return <Row key={p.id} p={p} sec="pending" idx={i} />; })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Cleared tab */}
+        {tab === "cleared" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#374151" }}>Cleared Payments</span>
+              <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#059669" }}>{fmt(clrTotal)}</span>
+              {clrItems.length > 0 && <button onClick={function() { selAll(clrItems); }} style={{ background: "none", border: "none", color: "#10b981", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>}
+            </div>
+            {clrItems.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>📋</div><div style={{ fontSize: 15, fontWeight: 600 }}>Nothing cleared yet</div></div>
+            ) : (
+              <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+                {clrItems.map(function(p, i) { return <Row key={p.id} p={p} sec="cleared" idx={i} />; })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Modals ── */}
+
+      {/* Add Payment */}
+      <Modal open={showAdd} onClose={function() { setShowAdd(false); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 12 }}>Add Payment</h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+
+          {/* Recurring toggle */}
+          <div style={{ display: "flex", borderRadius: 8, overflow: "hidden", border: "1.5px solid #E2E8F0" }}>
+            <button onClick={function() { setForm(Object.assign({}, form, { isRecurring: false })); }} style={{ flex: 1, padding: "8px 0", border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer", background: !form.isRecurring ? "#3B82F6" : "#F8FAFC", color: !form.isRecurring ? "#fff" : "#64748B" }}>One-Time</button>
+            <button onClick={function() { setForm(Object.assign({}, form, { isRecurring: true })); }} style={{ flex: 1, padding: "8px 0", border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer", background: form.isRecurring ? "#3B82F6" : "#F8FAFC", color: form.isRecurring ? "#fff" : "#64748B", borderLeft: "1px solid #E2E8F0" }}>Recurring Monthly</button>
+          </div>
+
+          <div><Label text="Name" /><input style={inputS} value={form.name} onChange={function(e) { setForm(Object.assign({}, form, { name: e.target.value })); }} placeholder="e.g. Office Supplies" /></div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div><Label text="Category" /><select style={Object.assign({}, inputS, { cursor: "pointer" })} value={form.category} onChange={function(e) { setForm(Object.assign({}, form, { category: e.target.value })); }}>{Object.keys(CATS).map(function(c) { return <option key={c}>{c}</option>; })}</select></div>
+            <div><Label text={form.category === "Credit Card" ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={form.amount} onChange={function(e) { setForm(Object.assign({}, form, { amount: e.target.value })); }} /></div>
+          </div>
+          <CCFields f={form} setF={setForm} />
+
+          {/* Conditional: One-time shows due date, Recurring shows day-of-month */}
+          {form.isRecurring ? (
+            <div>
+              <div><Label text="Due Day of Month (1-31)" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" min="1" max="31" value={form.dayOfMonth} onChange={function(e) { setForm(Object.assign({}, form, { dayOfMonth: e.target.value })); }} /></div>
+              <div style={{ marginTop: 10, padding: "9px 11px", background: "#F0FDF4", borderRadius: 8, border: "1px solid #BBF7D0" }}>
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 7, cursor: "pointer" }}>
+                  <input type="checkbox" checked={form.sameAmount} onChange={function(e) { setForm(Object.assign({}, form, { sameAmount: e.target.checked })); }} style={{ accentColor: "#10B981", width: 14, height: 14, marginTop: 2 }} />
+                  <div>
+                    <span style={{ fontSize: 12, color: "#374151", fontWeight: 500 }}>Same amount each month</span>
+                    <div style={{ fontSize: 10, color: "#94A3B8", marginTop: 1 }}>{form.sameAmount ? "Exact amount duplicated every month" : "Amount varies — you can edit each month"}</div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          ) : (
+            <div><Label text="Due Date" /><input style={inputS} type="date" value={form.dueDate} onChange={function(e) { setForm(Object.assign({}, form, { dueDate: e.target.value })); }} /></div>
+          )}
+
+          <div><Label text="Note" /><textarea style={Object.assign({}, inputS, { minHeight: 45, resize: "vertical" })} value={form.note} onChange={function(e) { setForm(Object.assign({}, form, { note: e.target.value })); }} placeholder="Optional note..." /></div>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer" }}><input type="checkbox" checked={form.autoPay} onChange={function(e) { setForm(Object.assign({}, form, { autoPay: e.target.checked })); }} style={{ accentColor: "#3B82F6", width: 14, height: 14 }} /><span style={{ fontSize: 12, color: "#374151" }}>Auto-Pay</span></label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={function() { setShowAdd(false); }} style={btnSecondary}>Cancel</button>
+            <button onClick={addPay} style={btnPrimary}>{form.isRecurring ? "Add Recurring" : "Add"}</button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Edit Payment */}
+      <Modal open={editId !== null} onClose={function() { setEditId(null); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 12 }}>Edit Payment</h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div><Label text="Name" /><input style={inputS} value={form.name} onChange={function(e) { setForm(Object.assign({}, form, { name: e.target.value })); }} /></div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div><Label text="Category" /><select style={Object.assign({}, inputS, { cursor: "pointer" })} value={form.category} onChange={function(e) { setForm(Object.assign({}, form, { category: e.target.value })); }}>{Object.keys(CATS).map(function(c) { return <option key={c}>{c}</option>; })}</select></div>
+            <div><Label text={form.category === "Credit Card" ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={form.amount} onChange={function(e) { setForm(Object.assign({}, form, { amount: e.target.value })); }} /></div>
+          </div>
+          <CCFields f={form} setF={setForm} />
+          <div><Label text="Due Date" /><input style={inputS} type="date" value={form.dueDate} onChange={function(e) { setForm(Object.assign({}, form, { dueDate: e.target.value })); }} /></div>
+          <div><Label text="Check #" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} value={form.checkNum} onChange={function(e) { setForm(Object.assign({}, form, { checkNum: e.target.value })); }} placeholder="Optional" /></div>
+          <div><Label text="Note" /><textarea style={Object.assign({}, inputS, { minHeight: 45, resize: "vertical" })} value={form.note} onChange={function(e) { setForm(Object.assign({}, form, { note: e.target.value })); }} /></div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={function() { setEditId(null); }} style={btnSecondary}>Cancel</button>
+            <button onClick={saveEdit} style={btnPrimary}>Save</button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Add Recurring */}
+      <Modal open={showRec} onClose={function() { setShowRec(false); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>Recurring Payments</h2>
+        <p style={{ fontSize: 11, color: "#64748B", marginBottom: 12 }}>Auto-created every month.</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div><Label text="Name" /><input style={inputS} value={recF.name} onChange={function(e) { setRecF(Object.assign({}, recF, { name: e.target.value })); }} placeholder="e.g. Internet Bill" /></div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div><Label text="Category" /><select style={Object.assign({}, inputS, { cursor: "pointer" })} value={recF.category} onChange={function(e) { setRecF(Object.assign({}, recF, { category: e.target.value })); }}>{Object.keys(CATS).map(function(c) { return <option key={c}>{c}</option>; })}</select></div>
+            <div><Label text={recF.category === "Credit Card" ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={recF.amount} onChange={function(e) { setRecF(Object.assign({}, recF, { amount: e.target.value })); }} /></div>
+          </div>
+          {recF.category === "Credit Card" && (
+            <div style={{ padding: "9px 11px", background: "#FFFBEB", borderRadius: 8, border: "1px solid #FDE68A", background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#92400E" }}>💳 Credit Card Details</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div><Label text="Min Payment ($)" /><input style={Object.assign({}, inputS, { borderColor: "#FDE68A" })} type="number" step=".01" value={recF.minPay} onChange={function(e) { setRecF(Object.assign({}, recF, { minPay: e.target.value })); }} /></div>
+                <div><Label text="Close Day" /><input style={Object.assign({}, inputS, { borderColor: "#FDE68A" })} type="number" min="1" max="31" value={recF.closeDay} onChange={function(e) { setRecF(Object.assign({}, recF, { closeDay: e.target.value })); }} /></div>
+              </div>
+            </div>
+          )}
+          <div><Label text="Due Day (1-31)" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" min="1" max="31" value={recF.dayOfMonth} onChange={function(e) { setRecF(Object.assign({}, recF, { dayOfMonth: e.target.value })); }} /></div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div><Label text="Start Date" /><input type="date" style={inputS} value={recF.startDate} onChange={function(e) { setRecF(Object.assign({}, recF, { startDate: e.target.value })); }} /></div>
+            <div><Label text="End Date (optional)" /><input type="date" style={inputS} value={recF.endDate} onChange={function(e) { setRecF(Object.assign({}, recF, { endDate: e.target.value })); }} /></div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={function() { setShowRec(false); }} style={btnSecondary}>Cancel</button>
+            <button onClick={addRec} style={btnPrimary}>Add</button>
+          </div>
+        </div>
+        {tmpls.length > 0 && (
+          <div style={{ marginTop: 14, borderTop: "1px solid #E2E8F0", paddingTop: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6, textTransform: "uppercase" }}>Active Recurring</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 300, overflowY: "auto" }}>
+              {tmpls.map(function(t, idx) {
+                var isCC = t.category === "Credit Card";
+                var isEditing = editTmplIdx === idx;
+
+                if (isEditing && editTmplF) {
+                  var ef = editTmplF;
+                  var setEf = function(o) { setEditTmplF(Object.assign({}, ef, o)); };
+                  return (
+                    <div key={t.name} style={{ padding: "10px", background: "#eff6ff", borderRadius: 8, border: "2px solid #3b82f6" }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: "#1e40af", marginBottom: 6 }}>✏️ Editing: {t.name}</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                          <input value={ef.name} onChange={function(e){setEditTmplF(Object.assign({},ef,{name:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} placeholder="Name" />
+                          <select value={ef.category} onChange={function(e){setEditTmplF(Object.assign({},ef,{category:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none", cursor: "pointer" }}>{Object.keys(CATS).map(function(c){return <option key={c}>{c}</option>;})}</select>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4 }}>
+                          <input value={ef.amount} onChange={function(e){setEditTmplF(Object.assign({},ef,{amount:e.target.value}));}} type="number" step=".01" placeholder="Amount" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} />
+                          <input value={ef.dayOfMonth} onChange={function(e){setEditTmplF(Object.assign({},ef,{dayOfMonth:e.target.value}));}} type="number" min="1" max="31" placeholder="Day" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
+                          {ef.category==="Credit Card" && <input value={ef.minPay} onChange={function(e){setEditTmplF(Object.assign({},ef,{minPay:e.target.value}));}} type="number" step=".01" placeholder="Min Pay" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #fde68a", fontSize: 11, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} />}
+                        </div>
+                        {ef.category==="Credit Card" && (
+                          <input value={ef.closeDay} onChange={function(e){setEditTmplF(Object.assign({},ef,{closeDay:e.target.value}));}} type="number" min="1" max="31" placeholder="Close Day" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #fde68a", fontSize: 11, outline: "none", width: "50%" }} />
+                        )}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                          <input type="date" value={ef.startDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{startDate:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
+                          <input type="date" value={ef.endDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{endDate:e.target.value}));}} placeholder="End" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
+                        </div>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button onClick={function(){setEditTmplIdx(null);setEditTmplF(null);}} style={{ flex: 1, padding: "5px", background: "white", border: "1px solid #d1d5db", borderRadius: 5, fontSize: 11, cursor: "pointer" }}>Cancel</button>
+                          <button onClick={saveEditTmpl} style={{ flex: 1, padding: "5px", background: "#3b82f6", color: "white", border: "none", borderRadius: 5, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Save</button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div key={t.name} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 8px", background: "#F8FAFC", borderRadius: 5, border: "1px solid #E2E8F0" }}>
+                    <div style={{ width: 5, height: 5, borderRadius: "50%", background: (CATS[t.category] || CATS.Other).dot }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#0F172A" }}>{t.name}</div>
+                      <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                        Day {t.dayOfMonth} · {fmt(t.amount)}
+                        {isCC && t.minPay ? " · Min " + fmt(t.minPay) : ""}
+                        {isCC && t.closeDay ? " · Closes day " + t.closeDay : ""}
+                      </div>
+                      {(t.startDate || t.endDate) && <div style={{ fontSize: 10, color: "#93c5fd" }}>
+                        {t.startDate ? "From " + fmtS(t.startDate) : ""}
+                        {t.endDate ? " → " + fmtS(t.endDate) : ""}
+                      </div>}
+                    </div>
+                    <button onClick={function() { openEditTmpl(idx); }} style={{ background: "#dbeafe", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#2563eb", fontSize: 14 }}>✏️</button>
+                    <button onClick={function() { remTmpl(t.name); }} style={{ background: "#fee2e2", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#dc2626", fontSize: 14 }}>🗑️</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        <div style={{ marginTop: 20, borderTop: "1px solid #E2E8F0", paddingTop: 14 }}>
+          <button onClick={resetAllData} style={{ width: "100%", padding: "10px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, cursor: "pointer", color: "#dc2626", fontSize: 13, fontWeight: 600 }}>🗑️ Reset All Data (start fresh)</button>
+        </div>
+      </Modal>
+
+      {/* Notes */}
+      <Modal open={noteId !== null} onClose={function() { setNoteId(null); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 10 }}>📝 Notes</h2>
+        <textarea value={noteIn} onChange={function(e) { setNoteIn(e.target.value); }} autoFocus placeholder="Add a note..." style={Object.assign({}, inputS, { minHeight: 100, resize: "vertical", marginBottom: 10, fontSize: 14 })} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={function() { setNoteId(null); }} style={btnSecondary}>Cancel</button>
+          <button onClick={function() { saveNote(noteId); }} style={Object.assign({}, btnPrimary, { background: "linear-gradient(135deg,#8B5CF6,#6366F1)" })}>Save Note</button>
+        </div>
+      </Modal>
+
+      {/* Check # */}
+      <Modal open={checkId !== null} onClose={function() { setCheckId(null); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 10 }}>Check Number</h2>
+        <input value={chkIn} onChange={function(e) { setChkIn(e.target.value); }} onKeyDown={function(e) { if (e.key === "Enter") saveChk(checkId); }} autoFocus placeholder="e.g. 10452" style={Object.assign({}, inputS, { fontSize: 16, fontFamily: "'JetBrains Mono',monospace", marginBottom: 10 })} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={function() { setCheckId(null); }} style={btnSecondary}>Cancel</button>
+          <button onClick={function() { saveChk(checkId); }} style={Object.assign({}, btnPrimary, { background: "linear-gradient(135deg,#10B981,#059669)" })}>Save</button>
+        </div>
+      </Modal>
+
+      {/* Employees */}
+      <Modal open={showEmp} onClose={function() { setShowEmp(false); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 10 }}>👥 Employees</h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
+          {emps.map(function(e) {
+            var isPaused = e.pauseFrom && (!e.pauseTo || e.pauseTo >= getToday());
+            return (
+              <div key={e.name} style={{ padding: "8px 10px", background: isPaused ? "#fef2f2" : "#F8FAFC", borderRadius: 6, border: isPaused ? "1px solid #fecaca" : "1px solid #E2E8F0" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: isPaused ? "#991b1b" : "#0F172A" }}>{e.name} {isPaused && <span style={{ fontSize: 10, color: "#dc2626", fontWeight: 700 }}>⏸ PAUSED</span>}</div>
+                    <div style={{ fontSize: 10, color: "#64748B", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(e.salary)}</div>
+                  </div>
+                  {isPaused ? (
+                    <button onClick={function() { unpauseEmp(e.name); }} style={{ background: "#d1fae5", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#059669", fontSize: 10, fontWeight: 600 }}>▶ Resume</button>
+                  ) : (
+                    <button onClick={function() { setPauseEmpName(e.name); setPauseFrom(getToday()); setPauseTo(""); }} style={{ background: "#fef3c7", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#92400e", fontSize: 10, fontWeight: 600 }}>⏸ Pause</button>
+                  )}
+                  <button onClick={function() { remEmp(e.name); }} style={{ background: "rgba(239,68,68,.06)", border: "none", borderRadius: 3, padding: "3px 6px", cursor: "pointer", color: "#EF4444", fontSize: 10 }}>✕</button>
+                </div>
+                <div style={{ display: "flex", gap: 6, marginTop: 3, fontSize: 10, color: "#94a3b8" }}>
+                  {e.startDate && <span>Start: {fmtS(e.startDate)}</span>}
+                  {e.pauseFrom && <span style={{ color: "#dc2626" }}>Paused: {fmtS(e.pauseFrom)}{e.pauseTo ? " → " + fmtS(e.pauseTo) : " → ongoing"}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Pause date picker */}
+        {pauseEmpName && (
+          <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#92400e", marginBottom: 6 }}>⏸ Pause: {pauseEmpName}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              <div><Label text="From" /><input type="date" value={pauseFrom} onChange={function(e) { setPauseFrom(e.target.value); }} style={Object.assign({}, inputS, { fontSize: 12, padding: "6px 8px" })} /></div>
+              <div><Label text="Until (optional)" /><input type="date" value={pauseTo} onChange={function(e) { setPauseTo(e.target.value); }} style={Object.assign({}, inputS, { fontSize: 12, padding: "6px 8px" })} /></div>
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              <button onClick={function() { setPauseEmpName(null); }} style={{ flex: 1, padding: "6px", background: "white", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 11, cursor: "pointer", color: "#374151" }}>Cancel</button>
+              <button onClick={function() { pauseEmp(pauseEmpName, pauseFrom, pauseTo); setPauseEmpName(null); }} style={{ flex: 1, padding: "6px", background: "#f59e0b", border: "none", borderRadius: 6, fontSize: 11, cursor: "pointer", color: "white", fontWeight: 600 }}>Pause</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ borderTop: "1px solid #E2E8F0", paddingTop: 8 }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: "#374151", marginBottom: 5 }}>Add Employee</div>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            <input value={empF.name} onChange={function(e) { setEmpF(Object.assign({}, empF, { name: e.target.value })); }} placeholder="Name" style={{ flex: 1, minWidth: 100, padding: "5px 8px", borderRadius: 5, border: "1.5px solid #E2E8F0", fontSize: 11, outline: "none", color: "#0F172A" }} />
+            <input value={empF.salary} onChange={function(e) { setEmpF(Object.assign({}, empF, { salary: e.target.value })); }} placeholder="Pay" type="number" style={{ width: 80, padding: "5px 8px", borderRadius: 5, border: "1.5px solid #E2E8F0", fontSize: 11, fontFamily: "'JetBrains Mono',monospace", outline: "none", color: "#0F172A" }} />
+            <input type="date" value={empF.startDate} onChange={function(e) { setEmpF(Object.assign({}, empF, { startDate: e.target.value })); }} style={{ width: 130, padding: "5px 8px", borderRadius: 5, border: "1.5px solid #E2E8F0", fontSize: 11, outline: "none", color: "#0F172A" }} />
+            <button onClick={addEmp} style={{ background: "#3B82F6", color: "#fff", border: "none", borderRadius: 5, padding: "5px 9px", cursor: "pointer", fontWeight: 600, fontSize: 10 }}>Add</button>
+          </div>
+        </div>
+        <button onClick={function() { setShowEmp(false); }} style={{ width: "100%", marginTop: 10, padding: 9, borderRadius: 8, border: "none", background: "#0F172A", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Done</button>
+      </Modal>
+
+      <footer style={{ textAlign: "center", padding: 24, color: "#6b7280", fontSize: 13, display: "flex", justifyContent: "center", alignItems: "center", gap: 12 }}>
+        <span>🔒 Data stored in SharePoint · OpsPay v2.0</span>
+        <span style={{
+          fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
+          background: saveStatus === "saving" ? "#fef3c7" : saveStatus === "error" ? "#fee2e2" : "#d1fae5",
+          color: saveStatus === "saving" ? "#92400e" : saveStatus === "error" ? "#991b1b" : "#065f46"
+        }}>
+          {saveStatus === "saving" ? "⏳ Saving..." : saveStatus === "error" ? "❌ Save failed" : "✅ Saved"}
+        </span>
+      </footer>
+    </div>
+  );
+}
+    // ════════════════════════════════════════
+    //  AUTH WRAPPER
+    // ════════════════════════════════════════
+    function App() {
+      var [user, setUser] = useState(null);
+      var [authLoading, setAuthLoading] = useState(true);
+      var [spReady, setSpReady] = useState(false);
+      var [error, setError] = useState(null);
+
+      useEffect(function() {
+        (async function() {
+          try { await msalInstance.initialize(); var a = msalInstance.getAllAccounts(); if (a.length > 0) setUser(a[0]); }
+          catch (e) { console.error('Auth:', e); }
+          finally { setAuthLoading(false); }
+        })();
+      }, []);
+
+      useEffect(function() {
+        if (!user) return;
+        (async function() {
+          try { await initSP(); setSpReady(true); }
+          catch (e) { console.error('SP:', e); setError('SharePoint: ' + e.message); }
+        })();
+      }, [user]);
+
+      var handleLogin = async function() {
+        setAuthLoading(true);
+        try { var r = await msalInstance.loginPopup(loginRequest); setUser(r.account); }
+        catch (e) { setError('Login: ' + e.message); }
+        finally { setAuthLoading(false); }
+      };
+      var handleLogout = async function() { await msalInstance.logoutPopup(); setUser(null); setSpReady(false); };
+
+      if (authLoading) return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12 }}>
+          <div style={{ width: 48, height: 48, border: "4px solid #e2e8f0", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+          <p style={{ color: "#6b7280" }}>Loading...</p>
+        </div>
+      );
+
+      if (!user) return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)" }}>
+          <div style={{ background: "white", padding: 48, borderRadius: 16, textAlign: "center", maxWidth: 400, width: "100%", margin: 20, boxShadow: "0 25px 50px -12px rgba(0,0,0,0.5)" }}>
+            <div style={{ width: 60, height: 60, borderRadius: 14, background: "linear-gradient(135deg,#3B82F6,#8B5CF6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, fontWeight: 700, color: "white", margin: "0 auto 16px" }}>$</div>
+            <h1 style={{ fontSize: 28, fontWeight: 700, color: "#0f172a", marginBottom: 8 }}>OpsPay</h1>
+            <p style={{ color: "#64748b", fontSize: 14, marginBottom: 24 }}>Payment Operations Dashboard</p>
+            <button onClick={handleLogin} style={{ width: "100%", padding: "14px 24px", background: "#0078d4", color: "white", border: "none", borderRadius: 8, fontSize: 16, fontWeight: 600, cursor: "pointer" }}>Sign in with Microsoft</button>
+            {error && <div style={{ color: "#dc2626", fontSize: 13, marginTop: 16 }}>{error}</div>}
+          </div>
+        </div>
+      );
+
+      if (!spReady) return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12 }}>
+          <div style={{ width: 48, height: 48, border: "4px solid #e2e8f0", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+          <p style={{ color: "#6b7280" }}>Connecting to SharePoint...</p>
+          {error && <div style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>{error}</div>}
+        </div>
+      );
+
+      return <PaymentDashboard onLogout={handleLogout} userName={user.name || user.username} />;
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
