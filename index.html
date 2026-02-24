@@ -364,6 +364,7 @@ function PaymentDashboard({ onLogout, userName }) {
   var [editEmpName, setEditEmpName] = useState(null);   // name of employee being edited
   var [editEmpF, setEditEmpF] = useState(null);          // edit form data for employee
   var [searchQ, setSearchQ] = useState("");               // global search query
+  var [copied, setCopied] = useState(false);              // clipboard copied feedback
 
   var cfgTimer = useRef(null);
   var refreshTimer = useRef(null);
@@ -897,6 +898,97 @@ function PaymentDashboard({ onLogout, userName }) {
     } catch(e) { console.error('Reset:', e); setSaveStatus("error"); }
   }
 
+  /* ══════ WHATSAPP SUMMARY — copy-paste for boss ══════ */
+  function generateSummary() {
+    var today = new Date();
+    var dateStr = today.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+
+    // Get all due/past-due items (unpaid, due today or earlier), excluding skipped
+    var dueItems = allPayments.filter(function(p) {
+      return p.status === UNPAID && p.dueDate <= td && !p.excluded;
+    }).sort(function(a, b) {
+      return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount;
+    });
+
+    var lines = [];
+    lines.push("💰 *OpsPay — Daily Summary*");
+    lines.push("📅 " + dateStr);
+    lines.push("");
+
+    // Balances
+    lines.push("🏦 *Operating Account Balance:* " + fmt(bal));
+    lines.push("📊 *Available (After Pending):* " + fmt(avail));
+    lines.push("");
+
+    // Funding
+    if (actionTotal > 0) {
+      lines.push("💵 *Total Payments Due:* " + fmt(actionTotal));
+      if (isShort) {
+        lines.push("🔴 *Additional Funding Needed:* " + fmt(gap));
+      } else {
+        lines.push("✅ *No additional funding needed* — covered by " + fmt(avail - actionTotal));
+      }
+    } else {
+      lines.push("✅ *No payments due today* — all caught up!");
+    }
+
+    if (pendTotal > 0) {
+      lines.push("⏳ *Pending to Clear:* " + fmt(pendTotal));
+    }
+
+    // Items list
+    if (dueItems.length > 0) {
+      lines.push("");
+      lines.push("━━━━━━━━━━━━━━━━━━");
+      lines.push("📋 *Payments Due (" + dueItems.length + "):*");
+      lines.push("");
+
+      var lastDate = null;
+      dueItems.forEach(function(p) {
+        if (p.dueDate !== lastDate) {
+          lastDate = p.dueDate;
+          if (p.dueDate === td) {
+            lines.push("▸ *Due Today:*");
+          } else {
+            var daysOver = Math.floor((new Date(td + "T12:00:00") - new Date(p.dueDate + "T12:00:00")) / 86400000);
+            lines.push("▸ *" + fmtS(p.dueDate) + "* (" + daysOver + "d overdue):");
+          }
+        }
+        var amtStr = fmt(effAmt(p));
+        var extras = [];
+        if (p.autoPay) extras.push("Auto-Pay");
+        if (p.category === "Credit Card" && p.useMin) extras.push("Min Pmt");
+        if (p.checkNum) extras.push("Chk #" + p.checkNum);
+        var line = "    • " + p.name + " — " + amtStr;
+        if (extras.length) line += " _(" + extras.join(", ") + ")_";
+        lines.push(line);
+      });
+    }
+
+    lines.push("");
+    lines.push("━━━━━━━━━━━━━━━━━━");
+
+    return lines.join("\n");
+  }
+
+  function copySummary() {
+    var text = generateSummary();
+    navigator.clipboard.writeText(text).then(function() {
+      setCopied(true);
+      setTimeout(function() { setCopied(false); }, 2500);
+    }).catch(function() {
+      // Fallback
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(function() { setCopied(false); }, 2500);
+    });
+  }
+
   /* ── Date Badge: small pill shown above the first item of each date ── */
   function DateBadge({ date }) {
     var isToday = date === td;
@@ -1109,6 +1201,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <button onClick={function() { setShowEmp(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>👥 Employees</button>
           <button onClick={function() { setShowRec(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>⟳ Recurring</button>
           <button onClick={function() { setShowFc(!showFc); }} style={{ padding: "8px 14px", background: showFc ? "rgba(139,92,246,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showFc ? 600 : 400 }}>📊 Forecast</button>
+          <button onClick={copySummary} style={{ padding: "8px 14px", background: copied ? "rgba(16,185,129,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: copied ? "1px solid rgba(16,185,129,0.4)" : "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: copied ? 600 : 400, transition: "all 0.2s" }}>{copied ? "✅ Copied!" : "📋 Share Summary"}</button>
           <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
           <button onClick={function() { setSaveStatus("saving"); spLoadAllPay().then(function(m) { setPayments(m); setSaveStatus("saved"); }).catch(function() { setSaveStatus("error"); }); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
           <button onClick={function() { if(confirm("Sign out of OpsPay?")) { var a = msalInstance.getAllAccounts(); if(a.length) { msalInstance.logoutPopup({ account: a[0] }).then(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }).catch(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }); } else { localStorage.clear(); sessionStorage.clear(); location.reload(); } }}} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Sign Out</button>
