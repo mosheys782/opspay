@@ -496,6 +496,13 @@ function PaymentDashboard({ onLogout, userName }) {
     : pendItems;
   var fClrItems = selDay ? clrItems.filter(function(p){return p.dueDate<=selDay;}) : clrItems;
 
+  // Future items: when selDay is in the future, show unpaid items between tomorrow and selDay
+  var futureItems = useMemo(function() {
+    if (!selDay || selDay <= td) return [];
+    return allPayments.filter(function(p) { return p.status === UNPAID && p.dueDate > td && p.dueDate <= selDay; })
+      .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount; });
+  }, [allPayments, selDay, td]);
+
   var actionTotal = sum(fActionItems,true);
   var exclTotal = sum(fActionItems.filter(function(p){return p.excluded;}),false);
   var exclCount = fActionItems.filter(function(p){return p.excluded;}).length;
@@ -551,9 +558,8 @@ function PaymentDashboard({ onLogout, userName }) {
 
   var dayItems = useMemo(function() {
     if (!selDay) return [];
-    // Show all unpaid + pending items from today through selected date (matching card calculation)
-    return allPayments.filter(function(p) { return p.status !== CLEARED && p.dueDate <= selDay; })
-      .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : a.name < b.name ? -1 : 1; });
+    return allPayments.filter(function(p) { return p.dueDate === selDay; })
+      .sort(function(a,b) { return a.status === CLEARED ? 1 : b.status === CLEARED ? -1 : a.name < b.name ? -1 : 1; });
   }, [selDay, allPayments]);
 
   /* ══════ ACTIONS — optimistic UI + background SP write ══════ */
@@ -853,6 +859,42 @@ function PaymentDashboard({ onLogout, userName }) {
     } catch(e) { console.error('Reset:', e); setSaveStatus("error"); }
   }
 
+  /* ── Date Badge: small pill shown above the first item of each date ── */
+  function DateBadge({ date }) {
+    var isToday = date === td;
+    var isPast = date < td;
+    return (
+      <div style={{
+        padding: "4px 12px", fontSize: 11, fontWeight: 700,
+        color: isToday ? "#1e40af" : isPast ? "#991b1b" : "#374151",
+        background: isToday ? "#dbeafe" : isPast ? "#fee2e2" : "#f1f5f9",
+        borderRadius: "6px 6px 0 0", borderBottom: "none",
+        display: "inline-flex", alignItems: "center", gap: 6,
+        marginTop: 8, marginLeft: 4
+      }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: isToday ? "#3b82f6" : isPast ? "#ef4444" : "#94a3b8" }} />
+        {isToday ? "Today — " + fmtS(date) : fmtS(date) + " · " + dayN(date)}
+      </div>
+    );
+  }
+
+  /* ── Render a list of items grouped by date with date badges ── */
+  function GroupedRows({ items, sec }) {
+    var lastDate = null;
+    var globalIdx = 0;
+    return items.map(function(p) {
+      var showBadge = p.dueDate !== lastDate;
+      lastDate = p.dueDate;
+      var idx = globalIdx++;
+      return (
+        <div key={p.id}>
+          {showBadge && <DateBadge date={p.dueDate} />}
+          <Row p={p} sec={sec} idx={idx} />
+        </div>
+      );
+    });
+  }
+
   /* ════ UI starts here ════ */
   function Row({ p, sec, idx }) {
     var cat = CATS[p.category] || CATS.Other;
@@ -917,6 +959,7 @@ function PaymentDashboard({ onLogout, userName }) {
             {p.autoPay && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(59,130,246,.1)", color: "#60A5FA" }}>Auto-Pay</span>}
             {p.checkNum && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(16,185,129,.1)", color: "#059669", fontFamily: "'JetBrains Mono',monospace" }}>Chk #{p.checkNum}</span>}
             {isPast && !isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
+            {!isPast && sec === "action" && p.dueDate !== td && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.08)", color: "#64748b" }}>due {fmtS(p.dueDate)}</span>}
             {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
             {isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped</span>}
           </div>
@@ -1201,7 +1244,7 @@ function PaymentDashboard({ onLogout, userName }) {
               <div style={{ marginTop: 10, borderTop: "1px solid #e5e7eb", paddingTop: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1e40af" }}>Through {fmtS(selDay)}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1e40af" }}>{fmtS(selDay)}</span>
                     <span style={{ fontSize: 12, color: "#64748b" }}>{dayN(selDay)}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1243,7 +1286,7 @@ function PaymentDashboard({ onLogout, userName }) {
         {/* Tabs */}
         <div style={{ display: "flex", background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 9, padding: 3, marginBottom: 12, border: "1px solid #e5e7eb" }}>
           {[
-            { k: "action", l: "Action Needed", n: actionItems.filter(function(p) { return !p.excluded; }).length, c: "#dc2626" },
+            { k: "action", l: "Action Needed", n: actionItems.filter(function(p) { return !p.excluded; }).length + (selDay && selDay > td ? futureItems.filter(function(p) { return !p.excluded; }).length : 0), c: "#dc2626" },
             { k: "pending", l: "Pending Clear", n: pendItems.length, c: "#F59E0B" },
             { k: "cleared", l: "Cleared", n: clrItems.length, c: "#10B981" }
           ].map(function(t) {
@@ -1264,7 +1307,7 @@ function PaymentDashboard({ onLogout, userName }) {
         {/* Action tab */}
         {tab === "action" && (
           <div>
-            {actionItems.length === 0 && <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>✓</div><div style={{ fontSize: 14, fontWeight: 600 }}>All caught up!</div></div>}
+            {actionItems.length === 0 && !futureItems.length && <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>✓</div><div style={{ fontSize: 14, fontWeight: 600 }}>All caught up!</div></div>}
             {exclCount > 0 && <div style={{ padding: "6px 10px", background: "#f1f5f9", borderRadius: 8, marginBottom: 10, fontSize: 11, color: "#94A3B8" }}>{exclCount} skipped ({fmt(exclTotal)}) — not in funding total</div>}
             {pastItems.length > 0 && (
               <div style={{ marginBottom: 12 }}>
@@ -1276,7 +1319,7 @@ function PaymentDashboard({ onLogout, userName }) {
                   <button onClick={function() { selAll(pastItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
-                  {pastItems.map(function(p, i) { return <Row key={p.id} p={p} sec="action" idx={i} />; })}
+                  <GroupedRows items={pastItems} sec="action" />
                 </div>
               </div>
             )}
@@ -1291,6 +1334,21 @@ function PaymentDashboard({ onLogout, userName }) {
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
                   {todayItems.map(function(p, i) { return <Row key={p.id} p={p} sec="action" idx={i} />; })}
+                </div>
+              </div>
+            )}
+            {futureItems.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#8B5CF6" }} />
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "#6d28d9" }}>Upcoming</span>
+                  <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#7c3aed" }}>{fmt(sum(futureItems.filter(function(p) { return !p.excluded; }), false))}</span>
+                  <span style={{ fontSize: 11, color: "#a78bfa" }}>through {fmtS(selDay)}</span>
+                  <div style={{ flex: 1 }} />
+                  <button onClick={function() { selAll(futureItems); }} style={{ background: "none", border: "none", color: "#a78bfa", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                </div>
+                <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+                  <GroupedRows items={futureItems} sec="action" />
                 </div>
               </div>
             )}
@@ -1310,7 +1368,7 @@ function PaymentDashboard({ onLogout, userName }) {
                   <button onClick={function() { selAll(pendItems); }} style={{ background: "none", border: "none", color: "#f59e0b", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
-                  {pendItems.map(function(p, i) { return <Row key={p.id} p={p} sec="pending" idx={i} />; })}
+                  <GroupedRows items={pendItems} sec="pending" />
                 </div>
               </div>
             )}
@@ -1329,7 +1387,7 @@ function PaymentDashboard({ onLogout, userName }) {
               <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>📋</div><div style={{ fontSize: 15, fontWeight: 600 }}>Nothing cleared yet</div></div>
             ) : (
               <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
-                {clrItems.map(function(p, i) { return <Row key={p.id} p={p} sec="cleared" idx={i} />; })}
+                {<GroupedRows items={clrItems} sec="cleared" />}
               </div>
             )}
           </div>
