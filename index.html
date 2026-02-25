@@ -365,6 +365,14 @@ function PaymentDashboard({ onLogout, userName }) {
   var [editEmpF, setEditEmpF] = useState(null);          // edit form data for employee
   var [searchQ, setSearchQ] = useState("");               // global search query
   var [copied, setCopied] = useState(false);              // clipboard copied feedback
+  var [skipUntil, setSkipUntil] = useState({});            // { payId: "2026-03-15" }
+  var [skipPickId, setSkipPickId] = useState(null);        // payment id for skip date picker
+  var [skipPickDate, setSkipPickDate] = useState("");      // date value in picker
+  var [showShare, setShowShare] = useState(false);         // share summary modal
+  var [shareOpts, setShareOpts] = useState({
+    balance: true, available: true, totalDue: true, funding: true,
+    pending: true, itemList: true, itemDetails: true
+  });
 
   var cfgTimer = useRef(null);
   var refreshTimer = useRef(null);
@@ -412,6 +420,7 @@ function PaymentDashboard({ onLogout, userName }) {
         setBal(b); setBalIn(String(b));
         if (cfg.balDate !== today) setEditBal(true); // auto-open balance editor
         setEmps(e); setTmpls(t);
+        if (cfg.skipUntil) setSkipUntil(cfg.skipUntil);
 
         var payMap = await fullLoad(t, e, cy, cm);
         setPayments(payMap);
@@ -467,12 +476,53 @@ function PaymentDashboard({ onLogout, userName }) {
     if (cfgTimer.current) clearTimeout(cfgTimer.current);
     setSaveStatus("saving");
     cfgTimer.current = setTimeout(async function() {
-      try { await spSaveConfig({ bal: bal, balDate: getToday(), emps: emps, tmpls: tmpls }); setSaveStatus("saved"); }
+      try { await spSaveConfig({ bal: bal, balDate: getToday(), emps: emps, tmpls: tmpls, skipUntil: skipUntil }); setSaveStatus("saved"); }
       catch(e) { console.error('Save config:', e); setSaveStatus("error"); }
     }, 1500);
-  }, [bal, emps, tmpls, ready]);
+  }, [bal, emps, tmpls, skipUntil, ready]);
 
   /* ══════ SEARCH FILTER ══════ */
+
+  /* ══════ AUTO-UNSKIP: check skipUntil dates ══════ */
+  useEffect(function() {
+    if (!ready) return;
+    var today = getToday();
+    var changed = false;
+    var newSkip = Object.assign({}, skipUntil);
+    var unskipIds = [];
+    Object.keys(newSkip).forEach(function(id) {
+      if (newSkip[id] && newSkip[id] <= today) {
+        unskipIds.push(id);
+        delete newSkip[id];
+        changed = true;
+      }
+    });
+    if (changed) {
+      setSkipUntil(newSkip);
+      unskipIds.forEach(function(id) {
+        var p = payments[id];
+        if (p && p.excluded) {
+          spUpdate(id, { Excluded: false });
+        }
+      });
+    }
+  }, [ready, payments]);
+
+  function skipWithDate(id, untilDate) {
+    // Mark as excluded
+    spUpdate(id, { Excluded: true });
+    // Store the unskip date if provided
+    if (untilDate) {
+      setSkipUntil(function(prev) { var n = Object.assign({}, prev); n[id] = untilDate; return n; });
+    }
+    setSkipPickId(null);
+    setSkipPickDate("");
+  }
+
+  function unskipPay(id) {
+    spUpdate(id, { Excluded: false });
+    setSkipUntil(function(prev) { var n = Object.assign({}, prev); delete n[id]; return n; });
+  }
   var searchFilter = useCallback(function(p) {
     if (!searchQ) return true;
     var q = searchQ.toLowerCase();
@@ -899,7 +949,8 @@ function PaymentDashboard({ onLogout, userName }) {
   }
 
   /* ══════ WHATSAPP SUMMARY — copy-paste for boss ══════ */
-  function generateSummary() {
+  function generateSummary(opts) {
+    if (!opts) opts = shareOpts;
     var today = new Date();
     var dateStr = today.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
     var throughDate = selDay && selDay > td ? selDay : null;
@@ -927,55 +978,65 @@ function PaymentDashboard({ onLogout, userName }) {
     lines.push("");
 
     // Balances
-    lines.push("🏦 *Operating Account Balance:* " + fmt(bal));
-    lines.push("📊 *Available (After Pending):* " + fmt(avail));
-    lines.push("");
+    if (opts.balance) {
+      lines.push("🏦 *Operating Account Balance:* " + fmt(bal));
+    }
+    if (opts.available) {
+      lines.push("📊 *Available (After Pending):* " + fmt(avail));
+    }
+    if (opts.balance || opts.available) lines.push("");
 
     // Funding
-    if (totalDue > 0) {
+    if (opts.totalDue && totalDue > 0) {
       lines.push("💵 *Total Payments Due" + (throughDate ? " Through " + fmtS(throughDate) : "") + ":* " + fmt(totalDue));
-      if (fundingGap > 0) {
-        lines.push("🔴 *Additional Funding Needed:* " + fmt(fundingGap));
+    }
+    if (opts.funding) {
+      if (totalDue > 0) {
+        if (fundingGap > 0) {
+          lines.push("🔴 *Additional Funding Needed:* " + fmt(fundingGap));
+        } else {
+          lines.push("✅ *No additional funding needed* — covered by " + fmt(Math.abs(fundingGap)));
+        }
       } else {
-        lines.push("✅ *No additional funding needed* — covered by " + fmt(Math.abs(fundingGap)));
+        lines.push("✅ *No payments due" + (throughDate ? " through " + fmtS(throughDate) : " today") + "* — all caught up!");
       }
-    } else {
-      lines.push("✅ *No payments due" + (throughDate ? " through " + fmtS(throughDate) : " today") + "* — all caught up!");
     }
 
-    if (pendTotal > 0) {
+    if (opts.pending && pendTotal > 0) {
       lines.push("⏳ *Pending to Clear:* " + fmt(pendTotal));
     }
 
     // Items list
-    if (dueItems.length > 0) {
+    if (opts.itemList && dueItems.length > 0) {
       lines.push("");
       lines.push("━━━━━━━━━━━━━━━━━━");
       lines.push("📋 *Payments Due (" + dueItems.length + "):*");
-      lines.push("");
 
-      var lastDate = null;
-      dueItems.forEach(function(p) {
-        if (p.dueDate !== lastDate) {
-          lastDate = p.dueDate;
-          if (p.dueDate === td) {
-            lines.push("▸ *Due Today:*");
-          } else if (p.dueDate < td) {
-            var daysOver = Math.floor((new Date(td + "T12:00:00") - new Date(p.dueDate + "T12:00:00")) / 86400000);
-            lines.push("▸ *" + fmtS(p.dueDate) + "* (" + daysOver + "d overdue):");
-          } else {
-            lines.push("▸ *" + fmtS(p.dueDate) + "* (" + dayN(p.dueDate) + "):");
+      if (opts.itemDetails) {
+        lines.push("");
+        var lastDate = null;
+        dueItems.forEach(function(p) {
+          if (p.dueDate !== lastDate) {
+            lastDate = p.dueDate;
+            if (p.dueDate === td) {
+              lines.push("▸ *Due Today:*");
+            } else if (p.dueDate < td) {
+              var daysOver = Math.floor((new Date(td + "T12:00:00") - new Date(p.dueDate + "T12:00:00")) / 86400000);
+              lines.push("▸ *" + fmtS(p.dueDate) + "* (" + daysOver + "d overdue):");
+            } else {
+              lines.push("▸ *" + fmtS(p.dueDate) + "* (" + dayN(p.dueDate) + "):");
+            }
           }
-        }
-        var amtStr = fmt(effAmt(p));
-        var extras = [];
-        if (p.autoPay) extras.push("Auto-Pay");
-        if (p.category === "Credit Card" && p.useMin) extras.push("Min Pmt");
-        if (p.checkNum) extras.push("Chk #" + p.checkNum);
-        var line = "    • " + p.name + " — " + amtStr;
-        if (extras.length) line += " _(" + extras.join(", ") + ")_";
-        lines.push(line);
-      });
+          var amtStr = fmt(effAmt(p));
+          var extras = [];
+          if (p.autoPay) extras.push("Auto-Pay");
+          if (p.category === "Credit Card" && p.useMin) extras.push("Min Pmt");
+          if (p.checkNum) extras.push("Chk #" + p.checkNum);
+          var line = "    • " + p.name + " — " + amtStr;
+          if (extras.length) line += " _(" + extras.join(", ") + ")_";
+          lines.push(line);
+        });
+      }
     }
 
     lines.push("");
@@ -985,7 +1046,7 @@ function PaymentDashboard({ onLogout, userName }) {
   }
 
   function copySummary() {
-    var text = generateSummary();
+    var text = generateSummary(shareOpts);
     navigator.clipboard.writeText(text).then(function() {
       setCopied(true);
       setTimeout(function() { setCopied(false); }, 2500);
@@ -1104,7 +1165,7 @@ function PaymentDashboard({ onLogout, userName }) {
             {isPast && !isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
             {!isPast && sec === "action" && p.dueDate !== td && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.08)", color: "#64748b" }}>due {fmtS(p.dueDate)}</span>}
             {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
-            {isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped</span>}
+            {isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped{skipUntil[p.id] ? " → resumes " + fmtS(skipUntil[p.id]) : ""}</span>}
           </div>
 
           {/* CC info */}
@@ -1147,8 +1208,11 @@ function PaymentDashboard({ onLogout, userName }) {
         {/* Actions */}
         <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
           <button onClick={function() { setNoteId(p.id); setNoteIn(p.note || ""); }} title="Note" style={smBtn(p.note ? "#f3e8ff" : "#f1f5f9", p.note ? "#7c3aed" : "#64748b")}>📝</button>
-          {sec === "action" && (
-            <button onClick={function() { toggleExcl(p.id); }} title={p.excluded ? "Include" : "Skip"} style={smBtn(p.excluded ? "#dbeafe" : "#f1f5f9", p.excluded ? "#2563eb" : "#64748b")}>{p.excluded ? "↩️" : "⏭️"}</button>
+          {sec === "action" && !p.excluded && (
+            <button onClick={function() { setSkipPickId(p.id); setSkipPickDate(""); }} title="Skip" style={smBtn("#f1f5f9", "#64748b")}>⏭️</button>
+          )}
+          {sec === "action" && p.excluded && (
+            <button onClick={function() { unskipPay(p.id); }} title="Include" style={smBtn("#dbeafe", "#2563eb")}>↩️</button>
           )}
           {p.isPayroll && !p.checkNum && sec !== "cleared" && (
             <button onClick={function() { setCheckId(p.id); setChkIn(""); }} title="Check #" style={smBtn("#d1fae5", "#059669")}>#️⃣</button>
@@ -1214,7 +1278,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <button onClick={function() { setShowEmp(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>👥 Employees</button>
           <button onClick={function() { setShowRec(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>⟳ Recurring</button>
           <button onClick={function() { setShowFc(!showFc); }} style={{ padding: "8px 14px", background: showFc ? "rgba(139,92,246,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showFc ? 600 : 400 }}>📊 Forecast</button>
-          <button onClick={copySummary} style={{ padding: "8px 14px", background: copied ? "rgba(16,185,129,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: copied ? "1px solid rgba(16,185,129,0.4)" : "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: copied ? 600 : 400, transition: "all 0.2s" }}>{copied ? "✅ Copied!" : "📋 Share Summary"}</button>
+          <button onClick={function() { setShowShare(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>📋 Share Summary</button>
           <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
           <button onClick={function() { setSaveStatus("saving"); spLoadAllPay().then(function(m) { setPayments(m); setSaveStatus("saved"); }).catch(function() { setSaveStatus("error"); }); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
           <button onClick={function() { if(confirm("Sign out of OpsPay?")) { var a = msalInstance.getAllAccounts(); if(a.length) { msalInstance.logoutPopup({ account: a[0] }).then(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }).catch(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }); } else { localStorage.clear(); sessionStorage.clear(); location.reload(); } }}} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Sign Out</button>
@@ -1560,6 +1624,61 @@ function PaymentDashboard({ onLogout, userName }) {
       </div>
 
       {/* ── Modals ── */}
+
+      {/* Skip with date picker */}
+      <Modal open={skipPickId !== null} onClose={function() { setSkipPickId(null); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>⏭️ Skip Payment</h2>
+        <p style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>{skipPickId && payments[skipPickId] ? payments[skipPickId].name : ""}</p>
+        <div style={{ marginBottom: 12 }}>
+          <Label text="Auto-resume on (optional)" />
+          <input type="date" value={skipPickDate} onChange={function(e) { setSkipPickDate(e.target.value); }} min={getToday()} style={Object.assign({}, inputS, { marginBottom: 4 })} />
+          <div style={{ fontSize: 11, color: "#94a3b8" }}>Leave blank to skip indefinitely. If a date is set, payment will automatically unskip on that day.</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={function() { setSkipPickId(null); }} style={btnSecondary}>Cancel</button>
+          <button onClick={function() { skipWithDate(skipPickId, skipPickDate || null); }} style={Object.assign({}, btnPrimary, { background: "linear-gradient(135deg,#94a3b8,#64748b)" })}>Skip{skipPickDate ? " until " + fmtS(skipPickDate) : " Indefinitely"}</button>
+        </div>
+      </Modal>
+
+      {/* Share Summary with options */}
+      <Modal open={showShare} onClose={function() { setShowShare(false); }}>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>📋 Share Summary</h2>
+        <p style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>Choose what to include, then copy to clipboard.</p>
+        {(function() {
+          var opts = [
+            { key: "balance", label: "Operating Account Balance", icon: "🏦" },
+            { key: "available", label: "Available (After Pending)", icon: "📊" },
+            { key: "totalDue", label: "Total Payments Due", icon: "💵" },
+            { key: "funding", label: "Funding Needed / Covered", icon: "🔴" },
+            { key: "pending", label: "Pending to Clear", icon: "⏳" },
+            { key: "itemList", label: "Payment Items (names & amounts)", icon: "📋" },
+            { key: "itemDetails", label: "Item Details (auto-pay, check #, min pmt)", icon: "📝" },
+          ];
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 16 }}>
+              {opts.map(function(o) {
+                var checked = shareOpts[o.key];
+                return (
+                  <label key={o.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: checked ? "#eff6ff" : "#f8fafc", border: checked ? "1.5px solid #93c5fd" : "1.5px solid #e2e8f0", borderRadius: 8, cursor: "pointer", transition: "all 0.15s" }}>
+                    <input type="checkbox" checked={checked} onChange={function() { setShareOpts(function(prev) { var n = Object.assign({}, prev); n[o.key] = !n[o.key]; return n; }); }} style={{ width: 16, height: 16, accentColor: "#3b82f6", cursor: "pointer" }} />
+                    <span style={{ fontSize: 15 }}>{o.icon}</span>
+                    <span style={{ fontSize: 13, fontWeight: checked ? 600 : 400, color: checked ? "#1e40af" : "#64748b" }}>{o.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+          );
+        })()}
+        {/* Preview */}
+        <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: 12, marginBottom: 14, maxHeight: 200, overflowY: "auto" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 6 }}>Preview</div>
+          <pre style={{ fontSize: 11, color: "#374151", whiteSpace: "pre-wrap", fontFamily: "inherit", lineHeight: 1.5, margin: 0 }}>{generateSummary(shareOpts)}</pre>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={function() { setShowShare(false); }} style={btnSecondary}>Cancel</button>
+          <button onClick={function() { copySummary(); setShowShare(false); }} style={Object.assign({}, btnPrimary, { background: copied ? "linear-gradient(135deg,#10b981,#059669)" : "linear-gradient(135deg,#3b82f6,#2563eb)" })}>{copied ? "✅ Copied!" : "📋 Copy to Clipboard"}</button>
+        </div>
+      </Modal>
 
       {/* Add Payment */}
       <Modal open={showAdd} onClose={function() { setShowAdd(false); }}>
