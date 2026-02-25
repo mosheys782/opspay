@@ -217,8 +217,16 @@ function getToday() { return toISO(new Date()); }
 function daysIn(y,m) { return new Date(y,m+1,0).getDate(); }
 function fmtS(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}); }
 function dayN(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"long"}); }
-function overdueTxt(s) { var diff=Math.floor((new Date(getToday()+"T12:00:00")-new Date(s+"T12:00:00"))/86400000); if(diff===1) return "1 day overdue"; if(diff>1) return diff+" days overdue"; return "due today"; }
+function overdueTxt(s) { var eff=effDue(s); var diff=Math.floor((new Date(getToday()+"T12:00:00")-new Date(eff+"T12:00:00"))/86400000); if(diff===1) return "1 day overdue"; if(diff>1) return diff+" days overdue"; return "due today"; }
 function effAmt(p) { if(p.category==="Credit Card"&&p.useMin&&p.minPay>0) return p.minPay; return p.amount; }
+/* If due date falls on Sat or Sun, effective due is the prior Friday */
+function effDue(dueDate) {
+  var d = parseD(dueDate);
+  var day = d.getDay(); // 0=Sun, 6=Sat
+  if (day === 6) return toISO(new Date(d.getTime() - 86400000));       // Sat → Fri
+  if (day === 0) return toISO(new Date(d.getTime() - 2 * 86400000));   // Sun → Fri
+  return dueDate;
+}
 
 /* ── Payroll dates: bi-weekly Wed from March 4 2026 ── */
 function payrollDates(year,month) {
@@ -540,11 +548,11 @@ function PaymentDashboard({ onLogout, userName }) {
   var allPayments = useMemo(function() { return Object.values(payments); }, [payments]);
 
   var actionItems = useMemo(function() {
-    return allPayments.filter(function(p){return p.status===UNPAID && p.dueDate<=td;}).filter(searchFilter)
+    return allPayments.filter(function(p){return p.status===UNPAID && effDue(p.dueDate)<=td;}).filter(searchFilter)
       .sort(function(a,b){return a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:b.amount-a.amount;});
   }, [allPayments, td, searchFilter]);
-  var todayItems = useMemo(function(){return actionItems.filter(function(p){return p.dueDate===td;});}, [actionItems,td]);
-  var pastItems = useMemo(function(){return actionItems.filter(function(p){return p.dueDate<td;});}, [actionItems,td]);
+  var todayItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)===td;});}, [actionItems,td]);
+  var pastItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)<td;});}, [actionItems,td]);
   var pendItems = useMemo(function(){
     return allPayments.filter(function(p){return p.status===PAID;}).filter(searchFilter).sort(function(a,b){return a.dueDate<b.dueDate?-1:1;});
   }, [allPayments, searchFilter]);
@@ -556,7 +564,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
   // Date-filtered totals: when a day is selected, show all unpaid+pending from today through that date
   var fActionItems = selDay
-    ? allPayments.filter(function(p){return p.status===UNPAID && p.dueDate<=selDay;})
+    ? allPayments.filter(function(p){return p.status===UNPAID && effDue(p.dueDate)<=selDay;})
     : actionItems;
   var fPendItems = selDay
     ? allPayments.filter(function(p){return p.status===PAID && p.dueDate<=selDay;})
@@ -569,7 +577,7 @@ function PaymentDashboard({ onLogout, userName }) {
     var hasFutureDay = selDay && selDay > td;
     if (!hasSearch && !hasFutureDay) return [];
     var maxDate = hasFutureDay ? selDay : "9999-12-31";
-    return allPayments.filter(function(p) { return p.status === UNPAID && p.dueDate > td && p.dueDate <= maxDate; }).filter(searchFilter)
+    return allPayments.filter(function(p) { return p.status === UNPAID && effDue(p.dueDate) > td && effDue(p.dueDate) <= maxDate; }).filter(searchFilter)
       .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount; });
   }, [allPayments, selDay, td, searchFilter, searchQ]);
 
@@ -958,7 +966,7 @@ function PaymentDashboard({ onLogout, userName }) {
     // Get items: due/past-due + future if date selected, excluding skipped
     var cutoff = throughDate || td;
     var dueItems = allPayments.filter(function(p) {
-      return p.status === UNPAID && p.dueDate <= cutoff && !p.excluded;
+      return p.status === UNPAID && effDue(p.dueDate) <= cutoff && !p.excluded;
     }).sort(function(a, b) {
       return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount;
     });
@@ -1102,7 +1110,7 @@ function PaymentDashboard({ onLogout, userName }) {
   /* ════ UI starts here ════ */
   function Row({ p, sec, idx }) {
     var cat = CATS[p.category] || CATS.Other;
-    var isPast = p.dueDate < td && p.status === UNPAID;
+    var isPast = effDue(p.dueDate) < td && p.status === UNPAID;
     var isExcl = p.excluded && sec === "action";
     var isCC = p.category === "Credit Card";
     var amt = effAmt(p);
@@ -1163,7 +1171,7 @@ function PaymentDashboard({ onLogout, userName }) {
             {p.autoPay && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(59,130,246,.1)", color: "#60A5FA" }}>Auto-Pay</span>}
             {p.checkNum && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(16,185,129,.1)", color: "#059669", fontFamily: "'JetBrains Mono',monospace" }}>Chk #{p.checkNum}</span>}
             {isPast && !isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
-            {!isPast && sec === "action" && p.dueDate !== td && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.08)", color: "#64748b" }}>due {fmtS(p.dueDate)}</span>}
+            {!isPast && sec === "action" && p.dueDate !== td && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: effDue(p.dueDate) === td && p.dueDate !== td ? "rgba(59,130,246,.1)" : "rgba(148,163,184,.08)", color: effDue(p.dueDate) === td && p.dueDate !== td ? "#2563eb" : "#64748b" }}>{effDue(p.dueDate) === td ? "due " + fmtS(p.dueDate) + " (wknd → Fri)" : "due " + fmtS(p.dueDate)}</span>}
             {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
             {isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped{skipUntil[p.id] ? " → resumes " + fmtS(skipUntil[p.id]) : ""}</span>}
           </div>
