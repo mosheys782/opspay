@@ -625,7 +625,8 @@ function PaymentDashboard({ onLogout, userName }) {
     for(var i=0;i<first;i++) days.push(null);
     for(var d=1;d<=dm;d++) {
       var ds = cy+"-"+pad(cm+1)+"-"+pad(d);
-      var monthPay = allPayments.filter(function(p){return p.dueDate===ds;});
+      // Include payments whose effective due (weekend→Friday) lands on this day
+      var monthPay = allPayments.filter(function(p){return effDue(p.dueDate)===ds || p.dueDate===ds;});
       var due = monthPay.filter(function(p){return p.status===UNPAID;}).reduce(function(s,p){return s+effAmt(p);},0);
       var cnt = monthPay.filter(function(p){return p.status===UNPAID;}).length;
       var hp = monthPay.some(function(p){return p.isPayroll && p.status!==CLEARED;});
@@ -636,8 +637,8 @@ function PaymentDashboard({ onLogout, userName }) {
 
   var dayItems = useMemo(function() {
     if (!selDay) return [];
-    return allPayments.filter(function(p) { return p.dueDate === selDay; })
-      .sort(function(a,b) { return a.status === CLEARED ? 1 : b.status === CLEARED ? -1 : a.name < b.name ? -1 : 1; });
+    return allPayments.filter(function(p) { return effDue(p.dueDate) === selDay || p.dueDate === selDay; })
+      .sort(function(a,b) { return a.status === CLEARED ? 1 : b.status === CLEARED ? -1 : a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : a.name < b.name ? -1 : 1; });
   }, [selDay, allPayments]);
 
   /* ══════ ACTIONS — optimistic UI + background SP write ══════ */
@@ -1326,7 +1327,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "6px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: "#1e40af" }}>📅 Funding needed through: {fmtS(selDay)} ({dayN(selDay)})</span>
             <div style={{ flex: 1 }} />
-            <button onClick={function() { setSelDay(null); setShowCal(false); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
+            <button onClick={function() { setSelDay(null); setShowCal(false); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
           </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 16, marginBottom: 24 }}>
@@ -1414,7 +1415,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
         {/* Date bar */}
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
-          <button onClick={function() { setShowCal(!showCal); }} style={{ background: showCal ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 7px", cursor: "pointer", display: "flex", alignItems: "center" }}>
+          <button onClick={function() { if (!showCal) { var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); } setShowCal(!showCal); }} style={{ background: showCal ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 7px", cursor: "pointer", display: "flex", alignItems: "center" }}>
             <CalIcon size={16} color={showCal ? "#60A5FA" : "#94A3B8"} />
           </button>
           <span style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>Today</span>
@@ -1451,7 +1452,7 @@ function PaymentDashboard({ onLogout, userName }) {
                 <button onClick={function() { var t = new Date(); setCy(t.getFullYear()); setCm(t.getMonth()); setShowCal(false); }} style={{ background: "rgba(59,130,246,.1)", border: "none", borderRadius: 4, padding: "2px 7px", color: "#60A5FA", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>Today</button>
               </div>
               <button onClick={function() { navMo(1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>›</button>
-              <button onClick={function() { setShowCal(false); setSelDay(null); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#64748b", fontSize: 12, fontWeight: 600, marginLeft: 4 }}>✕</button>
+              <button onClick={function() { setShowCal(false); setSelDay(null); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#64748b", fontSize: 12, fontWeight: 600, marginLeft: 4 }}>✕</button>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2, marginBottom: 2 }}>
               {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(function(d) { return <div key={d} style={{ textAlign: "center", fontSize: 10, fontWeight: 600, color: "#6b7280", padding: "4px 0" }}>{d}</div>; })}
