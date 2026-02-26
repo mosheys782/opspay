@@ -1123,7 +1123,7 @@ function PaymentDashboard({ onLogout, userName }) {
   function Row({ p, sec, idx }) {
     var cat = CATS[p.category] || CATS.Other;
     var isPast = effDue(p.dueDate) < td && p.status === UNPAID;
-    var isExcl = p.excluded && sec === "action";
+    var isExcl = p.excluded && (sec === "action" || sec === "skipped");
     var isCC = p.category === "Credit Card";
     var amt = effAmt(p);
     var stripe = idx % 2 === 0 ? "white" : "#f9fafb";
