@@ -1182,6 +1182,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
           <div style={{ display: "flex", gap: 4, marginTop: 2, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: cat.bg, color: cat.tx }}>{p.category}</span>
+            {(p.id.startsWith("r-") || p.id.startsWith("p-")) && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(99,102,241,.08)", color: "#6366f1" }}>🔁 Recurring</span>}
             {p.autoPay && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(59,130,246,.1)", color: "#60A5FA" }}>Auto-Pay</span>}
             {p.checkNum && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(16,185,129,.1)", color: "#059669", fontFamily: "'JetBrains Mono',monospace" }}>Chk #{p.checkNum}</span>}
             {isPast && !isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
