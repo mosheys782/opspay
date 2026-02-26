@@ -560,6 +560,11 @@ function PaymentDashboard({ onLogout, userName }) {
     return allPayments.filter(function(p){return p.status===CLEARED;}).filter(searchFilter).sort(function(a,b){return a.dueDate>b.dueDate?-1:1;});
   }, [allPayments, searchFilter]);
 
+  var skippedItems = useMemo(function() {
+    return allPayments.filter(function(p){return p.status===UNPAID && p.excluded;}).filter(searchFilter).sort(function(a,b){return a.dueDate<b.dueDate?-1:1;});
+  }, [allPayments, searchFilter]);
+  var skippedTotal = useMemo(function() { return skippedItems.reduce(function(s,p){return s+effAmt(p);},0); }, [skippedItems]);
+
   var sum = function(arr,filterExcl){return arr.filter(function(p){return filterExcl?!p.excluded:true;}).reduce(function(s,p){return s+effAmt(p);},0);};
 
   // Date-filtered totals: when a day is selected, show all unpaid+pending from today through that date
@@ -913,6 +918,12 @@ function PaymentDashboard({ onLogout, userName }) {
     selIds.forEach(function(id) { markPaid(id); });
     setSelected({});
   }
+  function bulkUnskip() {
+    if (!confirm("Unskip " + selCount + " items?")) return;
+    selIds.forEach(function(id) { unskipPay(id); });
+    setSel({});
+  }
+
   function bulkCleared() {
     if (!confirm("Mark " + selCount + " items as Cleared?")) return;
     selIds.forEach(function(id) { markCleared(id); });
@@ -1220,7 +1231,7 @@ function PaymentDashboard({ onLogout, userName }) {
           {sec === "action" && !p.excluded && (
             <button onClick={function() { setSkipPickId(p.id); setSkipPickDate(""); }} title="Skip" style={smBtn("#f1f5f9", "#64748b")}>⏭️</button>
           )}
-          {sec === "action" && p.excluded && (
+          {(sec === "action" || sec === "skipped") && p.excluded && (
             <button onClick={function() { unskipPay(p.id); }} title="Include" style={smBtn("#dbeafe", "#2563eb")}>↩️</button>
           )}
           {p.isPayroll && !p.checkNum && sec !== "cleared" && (
@@ -1515,6 +1526,7 @@ function PaymentDashboard({ onLogout, userName }) {
             {tab === "action" && <button onClick={bulkPaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>💰 Mark Paid</button>}
             {tab === "pending" && <button onClick={bulkCleared} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✓ Mark Cleared</button>}
             {tab === "pending" && <button onClick={bulkUnpaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Undo to Unpaid</button>}
+            {tab === "skipped" && <button onClick={bulkUnskip} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Unskip Selected</button>}
             {tab === "cleared" && <button onClick={bulkUnpaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Undo</button>}
             <button onClick={bulkDelete} style={{ background: "rgba(239,68,68,0.3)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>🗑️ Delete</button>
             <button onClick={selNone} style={{ background: "rgba(255,255,255,0.15)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ Clear</button>
@@ -1526,7 +1538,8 @@ function PaymentDashboard({ onLogout, userName }) {
           {[
             { k: "action", l: "Action Needed", n: actionItems.filter(function(p) { return !p.excluded; }).length + (selDay && selDay > td ? futureItems.filter(function(p) { return !p.excluded; }).length : 0), c: "#dc2626" },
             { k: "pending", l: "Pending Clear", n: pendItems.length, c: "#F59E0B" },
-            { k: "cleared", l: "Cleared", n: clrItems.length, c: "#10B981" }
+            { k: "cleared", l: "Cleared", n: clrItems.length, c: "#10B981" },
+            { k: "skipped", l: "Skipped", n: skippedItems.length, c: "#94A3B8" }
           ].map(function(t) {
             return (
               <button key={t.k} onClick={function() { setTab(t.k); setSelected({}); }} style={{
@@ -1630,6 +1643,39 @@ function PaymentDashboard({ onLogout, userName }) {
             )}
           </div>
         )}
+
+        {/* Skipped tab */}
+        {tab === "skipped" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#374151" }}>Skipped Payments</span>
+              <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#64748b" }}>{fmt(skippedTotal)}</span>
+              {skippedItems.length > 0 && <button onClick={function() { selAll(skippedItems); }} style={{ background: "none", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>}
+            </div>
+            {skippedItems.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>⏭️</div><div style={{ fontSize: 15, fontWeight: 600 }}>No skipped items</div></div>
+            ) : (
+              <div>
+                <div style={{ padding: "6px 10px", background: "#f1f5f9", borderRadius: 8, marginBottom: 10, fontSize: 11, color: "#94A3B8" }}>
+                  {skippedItems.length} item{skippedItems.length !== 1 ? "s" : ""} skipped &middot; {fmt(skippedTotal)} excluded from funding
+                  {Object.keys(skipUntil).length > 0 && " \u00b7 " + Object.keys(skipUntil).filter(function(id) { return skipUntil[id]; }).length + " with auto-resume dates"}
+                </div>
+                <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
+                  {skippedItems.map(function(p, i) {
+                    var resumeDate = skipUntil[p.id];
+                    return React.createElement("div", { key: p.id, style: { borderBottom: i < skippedItems.length - 1 ? "1px solid #f1f5f9" : "none" } },
+                      React.createElement(Row, { p: p, sec: "skipped", idx: i }),
+                      resumeDate ? React.createElement("div", { style: { padding: "2px 16px 8px 52px", fontSize: 11, color: "#94a3b8" } },
+                        "\u23f0 Auto-resumes: " + fmtS(resumeDate)
+                      ) : null
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
 
       {/* ── Modals ── */}
