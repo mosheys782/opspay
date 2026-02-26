@@ -912,6 +912,8 @@ function PaymentDashboard({ onLogout, userName }) {
     setSelected(s);
   }
   function selNone() { setSelected({}); }
+  function allSelected(items) { return items.length > 0 && items.every(function(p) { return !!selected[p.id]; }); }
+  function toggleSelAll(items) { if (allSelected(items)) { var n = Object.assign({}, selected); items.forEach(function(p) { delete n[p.id]; }); setSelected(n); } else { selAll(items); } }
 
   function bulkPaid() {
     if (!confirm("Mark " + selCount + " items as Paid?")) return;
@@ -921,7 +923,7 @@ function PaymentDashboard({ onLogout, userName }) {
   function bulkUnskip() {
     if (!confirm("Unskip " + selCount + " items?")) return;
     selIds.forEach(function(id) { unskipPay(id); });
-    setSel({});
+    setSelected({});
   }
 
   function bulkCleared() {
@@ -1123,7 +1125,7 @@ function PaymentDashboard({ onLogout, userName }) {
   function Row({ p, sec, idx }) {
     var cat = CATS[p.category] || CATS.Other;
     var isPast = effDue(p.dueDate) < td && p.status === UNPAID;
-    var isExcl = p.excluded && (sec === "action" || sec === "skipped");
+    var isExcl = p.excluded && sec === "action";
     var isCC = p.category === "Credit Card";
     var amt = effAmt(p);
     var stripe = idx % 2 === 0 ? "white" : "#f9fafb";
@@ -1186,7 +1188,8 @@ function PaymentDashboard({ onLogout, userName }) {
             {!isPast && sec === "action" && p.dueDate !== td && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: effDue(p.dueDate) === td && p.dueDate !== td ? "rgba(59,130,246,.1)" : "rgba(148,163,184,.08)", color: effDue(p.dueDate) === td && p.dueDate !== td ? "#2563eb" : "#64748b" }}>{effDue(p.dueDate) === td ? "due " + fmtS(p.dueDate) + " (wknd → Fri)" : "due " + fmtS(p.dueDate)}</span>}
             {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
             {sec === "skipped" && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.08)", color: "#64748b" }}>due {fmtS(p.dueDate)}</span>}
-            {isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped{skipUntil[p.id] ? " → resumes " + fmtS(skipUntil[p.id]) : ""}</span>}
+            {p.excluded && sec === "action" && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped</span>}
+            {p.excluded && skipUntil[p.id] && (sec === "action" || sec === "skipped") && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(245,158,11,.08)", color: "#d97706" }}>{"⏰"} Resumes {fmtS(skipUntil[p.id])}</span>}
           </div>
 
           {/* CC info */}
@@ -1500,7 +1503,7 @@ function PaymentDashboard({ onLogout, userName }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a" }}>{fmt(dayItems.reduce(function(s,p){return s+effAmt(p);},0))}</span>
                     <span style={{ fontSize: 11, color: "#94a3b8" }}>{dayItems.length} items</span>
-                    <button onClick={function() { selAll(dayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                    <button onClick={function() { toggleSelAll(dayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(dayItems) ? "Deselect all" : "Select all"}</button>
                     <button onClick={function() { setSelDay(null); }} style={{ background: "#f1f5f9", border: "none", borderRadius: 4, padding: "2px 6px", cursor: "pointer", color: "#64748b", fontSize: 11 }}>✕</button>
                   </div>
                 </div>
@@ -1568,7 +1571,7 @@ function PaymentDashboard({ onLogout, userName }) {
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#dc2626" }}>Past Due</span>
                   <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#991b1b" }}>{fmt(sum(pastItems.filter(function(p) { return !p.excluded; }), false))}</span>
                   <div style={{ flex: 1 }} />
-                  <button onClick={function() { selAll(pastItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                  <button onClick={function() { toggleSelAll(pastItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(pastItems) ? "Deselect all" : "Select all"}</button>
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
                   <GroupedRows items={pastItems} sec="action" />
@@ -1582,7 +1585,7 @@ function PaymentDashboard({ onLogout, userName }) {
                   <span style={{ fontSize: 14, fontWeight: 700, color: "#1e40af" }}>Due Today</span>
                   <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#2563eb" }}>{fmt(sum(todayItems.filter(function(p) { return !p.excluded; }), false))}</span>
                   <div style={{ flex: 1 }} />
-                  <button onClick={function() { selAll(todayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                  <button onClick={function() { toggleSelAll(todayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(todayItems) ? "Deselect all" : "Select all"}</button>
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
                   {todayItems.map(function(p, i) { return <Row key={p.id} p={p} sec="action" idx={i} />; })}
@@ -1597,7 +1600,7 @@ function PaymentDashboard({ onLogout, userName }) {
                   <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#7c3aed" }}>{fmt(sum(futureItems.filter(function(p) { return !p.excluded; }), false))}</span>
                   {selDay && <span style={{ fontSize: 11, color: "#a78bfa" }}>through {fmtS(selDay)}</span>}
                   <div style={{ flex: 1 }} />
-                  <button onClick={function() { selAll(futureItems); }} style={{ background: "none", border: "none", color: "#a78bfa", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                  <button onClick={function() { toggleSelAll(futureItems); }} style={{ background: "none", border: "none", color: "#a78bfa", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(futureItems) ? "Deselect all" : "Select all"}</button>
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
                   <GroupedRows items={futureItems} sec="action" />
@@ -1617,7 +1620,7 @@ function PaymentDashboard({ onLogout, userName }) {
                 <div style={{ padding: "6px 10px", background: "#fffbeb", borderRadius: 8, marginBottom: 10, display: "flex", justifyContent: "space-between", flexWrap: "wrap", alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "#F59E0B", fontWeight: 600 }}>Pending: {fmt(pendTotal)}</span>
                   <span style={{ fontSize: 11, color: "#94A3B8" }}>Available: {fmt(avail)}</span>
-                  <button onClick={function() { selAll(pendItems); }} style={{ background: "none", border: "none", color: "#f59e0b", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>
+                  <button onClick={function() { toggleSelAll(pendItems); }} style={{ background: "none", border: "none", color: "#f59e0b", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(pendItems) ? "Deselect all" : "Select all"}</button>
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
                   <GroupedRows items={pendItems} sec="pending" />
@@ -1633,7 +1636,7 @@ function PaymentDashboard({ onLogout, userName }) {
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, alignItems: "center" }}>
               <span style={{ fontSize: 14, fontWeight: 600, color: "#374151" }}>Cleared Payments</span>
               <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#059669" }}>{fmt(clrTotal)}</span>
-              {clrItems.length > 0 && <button onClick={function() { selAll(clrItems); }} style={{ background: "none", border: "none", color: "#10b981", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>}
+              {clrItems.length > 0 && <button onClick={function() { toggleSelAll(clrItems); }} style={{ background: "none", border: "none", color: "#10b981", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(clrItems) ? "Deselect all" : "Select all"}</button>}
             </div>
             {clrItems.length === 0 ? (
               <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>📋</div><div style={{ fontSize: 15, fontWeight: 600 }}>Nothing cleared yet</div></div>
@@ -1651,7 +1654,7 @@ function PaymentDashboard({ onLogout, userName }) {
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, alignItems: "center" }}>
               <span style={{ fontSize: 14, fontWeight: 600, color: "#374151" }}>Skipped Payments</span>
               <span style={{ fontSize: 14, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace", color: "#64748b" }}>{fmt(skippedTotal)}</span>
-              {skippedItems.length > 0 && <button onClick={function() { selAll(skippedItems); }} style={{ background: "none", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>Select all</button>}
+              {skippedItems.length > 0 && <button onClick={function() { toggleSelAll(skippedItems); }} style={{ background: "none", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(skippedItems) ? "Deselect all" : "Select all"}</button>}
             </div>
             {skippedItems.length === 0 ? (
               <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>⏭️</div><div style={{ fontSize: 15, fontWeight: 600 }}>No skipped items</div></div>
@@ -1659,18 +1662,9 @@ function PaymentDashboard({ onLogout, userName }) {
               <div>
                 <div style={{ padding: "6px 10px", background: "#f1f5f9", borderRadius: 8, marginBottom: 10, fontSize: 11, color: "#94A3B8" }}>
                   {skippedItems.length} item{skippedItems.length !== 1 ? "s" : ""} skipped &middot; {fmt(skippedTotal)} excluded from funding
-                  {Object.keys(skipUntil).length > 0 && " \u00b7 " + Object.keys(skipUntil).filter(function(id) { return skipUntil[id]; }).length + " with auto-resume dates"}
                 </div>
                 <div style={{ background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
-                  {skippedItems.map(function(p, i) {
-                    var resumeDate = skipUntil[p.id];
-                    return React.createElement("div", { key: p.id, style: { borderBottom: i < skippedItems.length - 1 ? "1px solid #f1f5f9" : "none" } },
-                      React.createElement(Row, { p: p, sec: "skipped", idx: i }),
-                      resumeDate ? React.createElement("div", { style: { padding: "2px 16px 8px 52px", fontSize: 11, color: "#94a3b8" } },
-                        "\u23f0 Auto-resumes: " + fmtS(resumeDate)
-                      ) : null
-                    );
-                  })}
+                  {skippedItems.map(function(p, i) { return <Row key={p.id} p={p} sec="skipped" idx={i} />; })}
                 </div>
               </div>
             )}
