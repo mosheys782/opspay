@@ -18,6 +18,7 @@
 </head>
 <body>
   <div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:16px;color:#64748b">Loading...</div></div>
+  <script>window.onerror=function(m,s,l,c,e){document.getElementById("root").innerHTML="<pre style=\"color:red;padding:20px;font-size:12px;white-space:pre-wrap\">ERROR at line "+l+":"+c+"\n"+m+"\n"+(e&&e.stack||"")+"</pre>";return true;};</script>
   <script type="text/babel" data-presets="react">
     const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
@@ -37,6 +38,9 @@
     };
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     const loginRequest = { scopes: ['User.Read', 'Sites.ReadWrite.All', 'Sites.Manage.All'] };
+    var msalReady = msalInstance.initialize().then(function() {
+      return msalInstance.handleRedirectPromise();
+    });
 
     // ════════════════════════════════════════
     //  GRAPH API
@@ -45,7 +49,7 @@
       var a = msalInstance.getAllAccounts();
       if (!a.length) throw new Error('No account');
       try { return (await msalInstance.acquireTokenSilent({ scopes: ['Sites.ReadWrite.All'], account: a[0] })).accessToken; }
-      catch (e) { return (await msalInstance.acquireTokenPopup(loginRequest)).accessToken; }
+      catch (e) { await msalInstance.acquireTokenRedirect({ scopes: ['Sites.ReadWrite.All'] }); return null; }
     }
     async function gFetch(url, opts) {
       var t = await getToken();
@@ -60,7 +64,7 @@
     // ════════════════════════════════════════
     //  SHAREPOINT — PROPER LIST STRUCTURE
     // ════════════════════════════════════════
-    var SP = { siteId: null, payListId: null, cfgListId: null, cfgItemId: null };
+    var SP = { siteId: null, payListId: null, cfgListId: null, cfgItemId: null, driveId: null };
 
     var PAY_COLUMNS = [
       { name: 'PayKey', text: {} },
@@ -79,6 +83,7 @@
       { name: 'UseMin', boolean: {} },
       { name: 'MonthKey', text: {} },
       { name: 'Varies', boolean: {} },
+      { name: 'AttachData', text: { allowMultipleLines: true, maxLength: 0 } },
     ];
 
     async function ensureList(name, extraCols) {
@@ -132,6 +137,20 @@
         });
         SP.cfgItemId = n.id;
       }
+      // Setup document library for attachments
+      try {
+        var driveResp = await gFetch('/sites/' + SP.siteId + '/drives');
+        var drives = (driveResp.value || []);
+        var opsDrive = drives.find(function(d) { return d.name === 'OpsPayAttachments'; });
+        if (opsDrive) {
+          SP.driveId = opsDrive.id;
+        } else {
+          // Use the default document library
+          var defaultDrive = drives.find(function(d) { return d.name === 'Documents' || d.name === 'Shared Documents'; });
+          if (defaultDrive) SP.driveId = defaultDrive.id;
+        }
+        console.log('Drive ID:', SP.driveId);
+      } catch(e) { console.warn('Drive setup:', e); }
       console.log('SP init:', SP);
     }
 
@@ -156,6 +175,7 @@
         EmpName: p.empName || '', Excluded: !!p.excluded, MinPay: p.minPay || 0,
         CloseDate: p.closeDate || '', UseMin: !!p.useMin,
         MonthKey: p.dueDate ? p.dueDate.substring(0, 7) : '', Varies: !!p.varies,
+        AttachData: p.attachData || '',
       };
     }
     function fieldsToPay(f, spId) {
@@ -166,6 +186,7 @@
         isPayroll: !!f.IsPayroll, empName: f.EmpName || '', excluded: !!f.Excluded,
         minPay: f.MinPay || 0, closeDate: f.CloseDate || '', useMin: !!f.UseMin,
         varies: !!f.Varies,
+        attachData: f.AttachData || '',
       };
     }
 
@@ -183,6 +204,46 @@
     async function spDeletePay(spId) {
       await gFetch('/sites/' + SP.siteId + '/lists/' + SP.payListId + '/items/' + spId, { method: 'DELETE' });
     }
+    async function spUploadAttachment(payId, file) {
+      if (!SP.driveId) {
+        // Find default drive
+        var driveResp = await gFetch('/sites/' + SP.siteId + '/drive');
+        SP.driveId = driveResp.id;
+      }
+      var ts = Date.now().toString(36);
+      var safeName = payId.replace(/[^a-zA-Z0-9\-_]/g, '_') + '__' + ts + '_' + file.name.replace(/[^a-zA-Z0-9._\-]/g, '_');
+      var url = '/drives/' + SP.driveId + '/root:/OpsPayAttachments/' + safeName + ':/content';
+      var resp = await fetch('https://graph.microsoft.com/v1.0' + url, {
+        method: 'PUT',
+        headers: { 'Authorization': 'Bearer ' + (await getToken()), 'Content-Type': file.type || 'application/octet-stream' },
+        body: file
+      });
+      if (!resp.ok) { var e = await resp.text(); throw new Error('Upload failed: ' + resp.status + ' ' + e); }
+      var data = await resp.json();
+      return { name: file.name, driveItemId: data.id, webUrl: data.webUrl, downloadUrl: data['@microsoft.graph.downloadUrl'] || data.webUrl };
+    }
+
+    async function spGetAttachment(payId) {
+      if (!SP.driveId) {
+        try { var dr = await gFetch('/sites/' + SP.siteId + '/drive'); SP.driveId = dr.id; } catch(e) { return null; }
+      }
+      try {
+        var safePre = payId.replace(/[^a-zA-Z0-9\-_]/g, '_');
+        var resp = await gFetch('/drives/' + SP.driveId + '/root:/OpsPayAttachments:/children');
+        var files = (resp.value || []).filter(function(f) { return f.name.startsWith(safePre + '__'); });
+        if (files.length > 0) {
+          var item = files[0];
+          var origName = item.name.split('__').slice(1).join('__') || item.name;
+          return { name: origName, driveItemId: item.id, webUrl: item.webUrl, downloadUrl: item['@microsoft.graph.downloadUrl'] || item.webUrl };
+        }
+      } catch(e) { console.warn('Attachment check:', e); }
+      return null;
+    }
+
+    async function spDeleteAttachment(driveItemId) {
+      await gFetch('/drives/' + SP.driveId + '/items/' + driveItemId, { method: 'DELETE' });
+    }
+
     async function spLoadAllPay() {
       var items = await getAllItems(SP.payListId);
       var map = {};
@@ -219,14 +280,358 @@ function fmtS(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"short",
 function dayN(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"long"}); }
 function overdueTxt(s) { var eff=effDue(s); var diff=Math.floor((new Date(getToday()+"T12:00:00")-new Date(eff+"T12:00:00"))/86400000); if(diff===1) return "1 day overdue"; if(diff>1) return diff+" days overdue"; return "due today"; }
 function effAmt(p) { if(p.category==="Credit Card"&&p.useMin&&p.minPay>0) return p.minPay; return p.amount; }
-/* If due date falls on Sat or Sun, effective due is the prior Friday */
+/* If due date falls on Sat, Sun, holiday, or office-closed day, effective due is the prior business day */
 function effDue(dueDate) {
   var d = parseD(dueDate);
-  var day = d.getDay(); // 0=Sun, 6=Sat
-  if (day === 6) return toISO(new Date(d.getTime() - 86400000));       // Sat → Fri
-  if (day === 0) return toISO(new Date(d.getTime() - 2 * 86400000));   // Sun → Fri
+  // Walk backwards until we find an open business day
+  var maxSteps = 10; // prevent infinite loop
+  while (maxSteps-- > 0) {
+    var day = d.getDay();
+    var iso = toISO(d);
+    if (day === 0 || day === 6) { d = new Date(d.getTime() - 86400000); continue; }
+    // Check custom office closed + holiday closed
+    if (typeof _closedDays !== "undefined" && _closedDays[iso]) { d = new Date(d.getTime() - 86400000); continue; }
+    return toISO(d);
+  }
   return dueDate;
 }
+var _closedDays = {};
+var _zmanLoc = { lat: 40.7128, lng: -74.006, tz: -5 };
+function updateClosedDays(customClosed, year) {
+  _closedDays = {};
+  // Add Jewish holiday closed days
+  var hols = getJewishHolidays(year);
+  Object.keys(hols).forEach(function(k) {
+    if (OFFICE_CLOSED_HOLIDAYS.indexOf(hols[k]) !== -1) _closedDays[k] = hols[k];
+  });
+  // Also check adjacent year for holidays near year boundaries
+  var hols2 = getJewishHolidays(year + 1);
+  Object.keys(hols2).forEach(function(k) { if (OFFICE_CLOSED_HOLIDAYS.indexOf(hols2[k]) !== -1) _closedDays[k] = hols2[k]; });
+  var holsPrev = getJewishHolidays(year - 1);
+  Object.keys(holsPrev).forEach(function(k) { if (OFFICE_CLOSED_HOLIDAYS.indexOf(holsPrev[k]) !== -1) _closedDays[k] = holsPrev[k]; });
+  // Add custom office closed dates
+  if (customClosed) {
+    Object.keys(customClosed).forEach(function(k) { _closedDays[k] = customClosed[k] || "Office Closed"; });
+  }
+}
+
+/* ── Hebrew Calendar ── */
+/* Simplified Hebrew date converter - handles years 5780-5800 (2020-2040) */
+/* Convert number to Hebrew numerals (Gematria) */
+function toHebNum(n) {
+  var ones = ["", "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט"];
+  var tens = ["", "י", "כ", "ל", "מ", "נ", "ס", "ע", "פ", "צ"];
+  var hundreds = ["", "ק", "ר", "ש", "ת", "תק", "תר", "תש", "תת", "תתק"];
+  if (n <= 0) return "";
+  var str = "";
+  if (n >= 100) { str += hundreds[Math.floor(n / 100)]; n = n % 100; }
+  // Special cases: 15 = ט״ו not יה, 16 = ט״ז not יו
+  if (n === 15) return str + "ט״ו";
+  if (n === 16) return str + "ט״ז";
+  if (n >= 10) { str += tens[Math.floor(n / 10)]; n = n % 10; }
+  str += ones[n];
+  // Add geresh for single char, gershayim for multi
+  if (str.length === 1) return str + "׳";
+  if (str.length > 1) return str.slice(0, -1) + "״" + str.slice(-1);
+  return str;
+}
+
+/* Hebrew year - just last 3 digits in gematria (e.g. 5786 -> תשפ״ו) */
+function toHebYear(hy) {
+  var y = hy % 1000; // 786
+  return toHebNum(y);
+}
+
+function hebrewMonthName(m) {
+  var names = ["ניסן","אייר","סיון","תמוז","אב","אלול","תשרי","חשון","כסלו","טבת","שבט","אדר","אדר ב"];
+  return names[m-1] || "";
+}
+
+function isHebrewLeapYear(hy) { return ((7 * hy + 1) % 19) < 7; }
+
+function hebrewElapsedDays(hy) {
+  var months = Math.floor((235 * hy - 234) / 19);
+  var parts = 12084 + 13753 * months;
+  var day = 29 * months + Math.floor(parts / 25920);
+  if (3 * (day + 1) % 7 < 3) day++;
+  return day;
+}
+
+function hebrewYearDays(hy) { return hebrewElapsedDays(hy + 1) - hebrewElapsedDays(hy); }
+
+function hebrewMonthDays(hy, hm) {
+  // hm: 1=Nisan..12=Adar, 13=Adar II
+  if ([2,4,6,10,13].indexOf(hm) !== -1) return 29;
+  if (hm === 12 && !isHebrewLeapYear(hy)) return 29;
+  if (hm === 8) { var yd = hebrewYearDays(hy); return (yd % 10 === 5) ? 30 : 29; }
+  if (hm === 9) { var yd2 = hebrewYearDays(hy); return (yd2 % 10 === 3) ? 29 : 30; }
+  return 30;
+}
+
+/* Convert Gregorian to Hebrew date */
+function gregToHebrew(year, month, day) {
+  // Use astronomical calculation
+  // Reference: 1 Tishrei 5784 = Sep 16, 2023
+  var jd = gregorianToJD(year, month + 1, day);
+  // Search for Hebrew year
+  var hy = year + 3761;
+  var tishrei1 = hebrewNewYearJD(hy);
+  if (jd < tishrei1) { hy--; tishrei1 = hebrewNewYearJD(hy); }
+  var next = hebrewNewYearJD(hy + 1);
+  if (jd >= next) { hy++; tishrei1 = next; }
+  
+  var dayOfYear = jd - tishrei1;
+  // Walk through months starting from Tishrei (month 7)
+  var monthOrder = [7,8,9,10,11,12];
+  if (isHebrewLeapYear(hy)) monthOrder.push(13);
+  monthOrder = monthOrder.concat([1,2,3,4,5,6]);
+  
+  var acc = 0;
+  for (var i = 0; i < monthOrder.length; i++) {
+    var md = hebrewMonthDays(hy, monthOrder[i]);
+    if (dayOfYear < acc + md) {
+      return { year: hy, month: monthOrder[i], day: dayOfYear - acc + 1 };
+    }
+    acc += md;
+  }
+  return { year: hy, month: 6, day: 29 }; // fallback
+}
+
+function gregorianToJD(y, m, d) {
+  if (m <= 2) { y--; m += 12; }
+  var A = Math.floor(y / 100);
+  var B = 2 - A + Math.floor(A / 4);
+  return Math.floor(365.25 * (y + 4716)) + Math.floor(30.6001 * (m + 1)) + d + B - 1524.5;
+}
+
+function hebrewNewYearJD(hy) {
+  // 1 Tishrei of Hebrew year hy in Julian Day
+  var elapsed = hebrewElapsedDays(hy);
+  // Hebrew epoch: JD 347997.5 = 1 Tishrei 1
+  return elapsed + 347997.5;
+}
+
+function hebrewDateStr(year, month, day) {
+  return day + " " + hebrewMonthName(month) + " " + year;
+}
+
+/* ── Jewish Holidays (fixed Hebrew calendar dates) ── */
+function getJewishHolidays(gYear) {
+  // Generate holidays for a Gregorian year by checking each day
+  var holidays = {};
+  // Check each day of the Gregorian year
+  for (var m = 0; m < 12; m++) {
+    var dim = daysIn(gYear, m);
+    for (var d = 1; d <= dim; d++) {
+      var h = gregToHebrew(gYear, m, d);
+      var key = gYear + "-" + pad(m + 1) + "-" + pad(d);
+      var hol = null;
+      
+      // Tishrei holidays
+      if (h.month === 7 && h.day === 1) hol = "ראש השנה";
+      if (h.month === 7 && h.day === 2) hol = "ראש השנה ב";
+      if (h.month === 7 && h.day === 3) hol = "צום גדליה";
+      if (h.month === 7 && h.day === 10) hol = "יום כיפור";
+      if (h.month === 7 && h.day === 15) hol = "סוכות";
+      if (h.month === 7 && h.day === 16) hol = "סוכות ב";
+      if (h.month === 7 && h.day === 21) hol = "הושענא רבה";
+      if (h.month === 7 && h.day === 22) hol = "שמיני עצרת";
+      if (h.month === 7 && h.day === 23) hol = "שמחת תורה";
+      if (h.month === 7 && h.day >= 17 && h.day <= 20) hol = "חול המועד סוכות";
+      
+      // Kislev/Tevet - Chanukah
+      if (h.month === 9 && h.day === 25) hol = "חנוכה";
+      if (h.month === 9 && h.day >= 26 && h.day <= 30) hol = "חנוכה";
+      if (h.month === 10 && h.day <= 2) hol = "חנוכה";
+      if (h.month === 9 && h.day === 30 || (h.month === 10 && h.day === 1)) hol = "חנוכה"; // could be 1 or 2 Tevet
+      
+      // Tevet
+      if (h.month === 10 && h.day === 10) hol = "עשרה בטבת";
+      
+      // Shevat
+      if (h.month === 11 && h.day === 15) hol = "ט״ו בשבט";
+      
+      // Adar
+      if (h.month === 12 && !isHebrewLeapYear(h.year) && h.day === 13) hol = "תענית אסתר";
+      if (h.month === 12 && !isHebrewLeapYear(h.year) && h.day === 14) hol = "פורים";
+      if (h.month === 12 && !isHebrewLeapYear(h.year) && h.day === 15) hol = "שושן פורים";
+      if (h.month === 13 && h.day === 13) hol = "תענית אסתר";
+      if (h.month === 13 && h.day === 14) hol = "פורים";
+      if (h.month === 13 && h.day === 15) hol = "שושן פורים";
+      
+      // Nisan
+      if (h.month === 1 && h.day === 15) hol = "פסח";
+      if (h.month === 1 && h.day === 16) hol = "פסח ב";
+      if (h.month === 1 && h.day >= 17 && h.day <= 20) hol = "חול המועד פסח";
+      if (h.month === 1 && h.day === 21) hol = "פסח ז";
+      if (h.month === 1 && h.day === 22) hol = "פסח ח";
+      
+      // Iyar
+      if (h.month === 2 && h.day === 5) hol = "יום העצמאות";
+      if (h.month === 2 && h.day === 18) hol = "ל״ג בעומר";
+      
+      // Sivan
+      if (h.month === 3 && h.day === 6) hol = "שבועות";
+      if (h.month === 3 && h.day === 7) hol = "שבועות ב";
+      
+      // Tammuz
+      if (h.month === 4 && h.day === 17) hol = "שבעה עשר בתמוז";
+      
+      // Av
+      if (h.month === 5 && h.day === 9) hol = "תשעה באב";
+      if (h.month === 5 && h.day === 15) hol = "ט״ו באב";
+      
+      if (hol) holidays[key] = hol;
+    }
+  }
+  return holidays;
+}
+
+/* Major holidays where office is typically closed */
+
+/* ── Weekly Torah Portions (Parshiyos) ── */
+var PARSHIYOS = [
+  "בראשית","נח","לך לך","וירא","חיי שרה","תולדות","ויצא","וישלח","וישב","מקץ","ויגש",
+  "ויחי","שמות","וארא","בא","בשלח","יתרו","משפטים","תרומה","תצוה","כי תשא","ויקהל","פקודי",
+  "ויקרא","צו","שמיני","תזריע","מצורע","אחרי מות","קדושים","אמור","בהר","בחקתי",
+  "במדבר","נשא","בהעלתך","שלח","קרח","חקת","בלק","פינחס","מטות","מסעי",
+  "דברים","ואתחנן","עקב","ראה","שופטים","כי תצא","נצבים","וילך","האזינו"
+];
+
+/* Simple parsha lookup - approximation based on week of year from Simchas Torah */
+function getParshaForShabbat(gYear, gMonth, gDay) {
+  // Find Simchas Torah of current cycle
+  var h = gregToHebrew(gYear, gMonth, gDay);
+  var hy = h.month >= 7 ? h.year : h.year; // Hebrew year
+  
+  // Find the Shabbat after Simchas Torah (23 Tishrei)
+  // Walk from 23 Tishrei forward to first Shabbat = Bereishis
+  // For simplicity, use a week counter from Bereishis
+  // This is approximate - proper calculation needs full Hebrew calendar cycle
+  
+  // Get JD of this Shabbat
+  var jdShabbat = gregorianToJD(gYear, gMonth + 1, gDay);
+  
+  // Get JD of Simchas Torah of this cycle
+  var stHy = hy;
+  var jdST = hebrewNewYearJD(stHy) + 22; // 23 Tishrei
+  
+  // If this Shabbat is before Simchas Torah, use previous year
+  if (jdShabbat < jdST) {
+    stHy--;
+    jdST = hebrewNewYearJD(stHy) + 22;
+  }
+  
+  // Find first Shabbat after Simchas Torah
+  var d = new Date((jdST - 2440587.5) * 86400000);
+  while (d.getDay() !== 6) d = new Date(d.getTime() + 86400000);
+  var jdBereishis = gregorianToJD(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  
+  var weekNum = Math.round((jdShabbat - jdBereishis) / 7);
+  if (weekNum < 0 || weekNum >= PARSHIYOS.length) return "";
+  return PARSHIYOS[weekNum] || "";
+}
+
+/* Approximate candle lighting time (18 min before sunset) for NYC area */
+/* Uses a simplified solar calculation */
+/* Zmanim location presets */
+var ZMAN_CITIES = [
+  { name: "New York", lat: 40.7128, lng: -74.006, tz: -5 },
+  { name: "Los Angeles", lat: 34.0522, lng: -118.2437, tz: -8 },
+  { name: "Chicago", lat: 41.8781, lng: -87.6298, tz: -6 },
+  { name: "Miami", lat: 25.7617, lng: -80.1918, tz: -5 },
+  { name: "Houston", lat: 29.7604, lng: -95.3698, tz: -6 },
+  { name: "Monticello", lat: 41.6556, lng: -74.6890, tz: -5 },
+  { name: "Lakewood", lat: 40.0960, lng: -74.2218, tz: -5 },
+  { name: "Baltimore", lat: 39.2904, lng: -76.6122, tz: -5 },
+  { name: "Jerusalem", lat: 31.7683, lng: 35.2137, tz: 2 },
+  { name: "Bnei Brak", lat: 32.0853, lng: 34.8334, tz: 2 },
+  { name: "London", lat: 51.5074, lng: -0.1278, tz: 0 },
+  { name: "Toronto", lat: 43.6532, lng: -79.3832, tz: -5 },
+  { name: "Montreal", lat: 45.5017, lng: -73.5673, tz: -5 },
+];
+
+function getSunsetTime(gYear, gMonth, gDay, loc) {
+  var lat = loc.lat;
+  var lng = loc.lng;
+  var baseTz = loc.tz;
+  var dayOfYear = Math.floor((Date.UTC(gYear, gMonth, gDay) - Date.UTC(gYear, 0, 0)) / 86400000);
+  // Equation of time correction
+  var B = 2 * Math.PI * (dayOfYear - 81) / 365;
+  var EoT = 9.87 * Math.sin(2*B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B); // minutes
+  var decl = -23.45 * Math.cos(2 * Math.PI * (dayOfYear + 10) / 365);
+  var declRad = decl * Math.PI / 180;
+  var latRad = lat * Math.PI / 180;
+  var cosH = (Math.sin(-0.833 * Math.PI / 180) - Math.sin(latRad) * Math.sin(declRad)) / (Math.cos(latRad) * Math.cos(declRad));
+  if (cosH > 1 || cosH < -1) return null;
+  var H = Math.acos(cosH) * 180 / Math.PI;
+  // Solar noon in UTC = 12:00 - EoT(hours) - longitude/15
+  var solarNoonUTC = 12 - (EoT / 60) - (lng / 15);
+  var sunsetUTC = solarNoonUTC + H / 15;
+  // DST check
+  var isDST = false;
+  if (baseTz >= -10 && baseTz <= -4) {
+    var marStart = new Date(gYear, 2, 8); while (marStart.getDay() !== 0) marStart = new Date(marStart.getTime() + 86400000);
+    var novEnd = new Date(gYear, 10, 1); while (novEnd.getDay() !== 0) novEnd = new Date(novEnd.getTime() + 86400000);
+    if (new Date(gYear, gMonth, gDay) >= marStart && new Date(gYear, gMonth, gDay) < novEnd) isDST = true;
+  } else if (baseTz === 0) {
+    var marLast = new Date(gYear, 2, 31); while (marLast.getDay() !== 0) marLast = new Date(marLast.getTime() - 86400000);
+    var octLast = new Date(gYear, 9, 31); while (octLast.getDay() !== 0) octLast = new Date(octLast.getTime() - 86400000);
+    if (new Date(gYear, gMonth, gDay) >= marLast && new Date(gYear, gMonth, gDay) < octLast) isDST = true;
+  } else if (baseTz === 2) {
+    var octLastSun = new Date(gYear, 9, 31); while (octLastSun.getDay() !== 0) octLastSun = new Date(octLastSun.getTime() - 86400000);
+    var marFri = new Date(gYear, 2, 23); while (marFri.getDay() !== 5) marFri = new Date(marFri.getTime() + 86400000);
+    if (new Date(gYear, gMonth, gDay) >= marFri && new Date(gYear, gMonth, gDay) < octLastSun) isDST = true;
+  }
+  var localOffset = baseTz + (isDST ? 1 : 0);
+  var sunsetLocal = sunsetUTC + localOffset;
+  return sunsetLocal;
+}
+
+function getCandleLighting(gYear, gMonth, gDay, loc) {
+  var sunset = getSunsetTime(gYear, gMonth, gDay, loc);
+  if (sunset === null) return "";
+  var candleMin = (sunset * 60) - 18;
+  var hrs = Math.floor(candleMin / 60);
+  var mins = Math.round(candleMin % 60);
+  if (mins === 60) { hrs++; mins = 0; }
+  var ampm = hrs >= 12 ? "PM" : "AM";
+  var h12 = hrs % 12; if (h12 === 0) h12 = 12;
+  return h12 + ":" + (mins < 10 ? "0" : "") + mins + " " + ampm;
+}
+
+/* Check if a date is a fast day and get fast end time */
+function getFastTimes(gYear, gMonth, gDay) {
+  var h = gregToHebrew(gYear, gMonth, gDay);
+  var fasts = {};
+  // Fast days end at nightfall (~40 min after sunset for regular, ~50 for Yom Kippur/Tisha BAv)
+  var isMajor = false;
+  var isFast = false;
+  
+  if (h.month === 7 && h.day === 3) isFast = true; // Tzom Gedaliah
+  if (h.month === 7 && h.day === 10) { isFast = true; isMajor = true; } // Yom Kippur
+  if (h.month === 10 && h.day === 10) isFast = true; // 10 Teves
+  if (h.month === 4 && h.day === 17) isFast = true; // 17 Tammuz
+  if (h.month === 5 && h.day === 9) { isFast = true; isMajor = true; } // Tisha B'Av
+  if ((h.month === 12 && !isHebrewLeapYear(h.year) && h.day === 13) || (h.month === 13 && h.day === 13)) isFast = true; // Taanis Esther
+  
+  if (!isFast) return null;
+  
+  // Calculate end time using location
+  var sunset = typeof _zmanLoc !== "undefined" ? getSunsetTime(gYear, gMonth, gDay, _zmanLoc) : getSunsetTime(gYear, gMonth, gDay, {lat:40.7128,lng:-74.006,tz:-5});
+  if (sunset === null) return null;
+  var endMin = (sunset * 60) + (isMajor ? 50 : 40);
+  var hrs = Math.floor(endMin / 60);
+  var mins = Math.round(endMin % 60);
+  if (mins === 60) { hrs++; mins = 0; }
+  var ampm = hrs >= 12 ? "PM" : "AM";
+  var h12 = hrs % 12; if (h12 === 0) h12 = 12;
+  return { end: h12 + ":" + (mins < 10 ? "0" : "") + mins + " " + ampm, isMajor: isMajor };
+}
+
+var OFFICE_CLOSED_HOLIDAYS = ["ראש השנה","ראש השנה ב","יום כיפור","סוכות","סוכות ב","שמיני עצרת","שמחת תורה","פסח","פסח ב","פסח ז","פסח ח","שבועות","שבועות ב"];
+
+
 
 /* ── Payroll dates: bi-weekly Wed from March 4 2026 ── */
 function payrollDates(year,month) {
@@ -310,6 +715,40 @@ var btnSecondary = {flex:1,padding:"10px 20px",borderRadius:8,border:"1px solid 
 var smBtn = function(bg,color){return{background:bg,border:"none",borderRadius:6,padding:"6px 10px",cursor:"pointer",color:color,fontSize:14,display:"inline-flex",alignItems:"center",justifyContent:"center"};};
 
 /* ── Components ── */
+function AttachSection({ editId, attachments, attachLoading, openAttachViewer, removeAttachment, uploadAttachment }) {
+  var list = (editId && attachments && attachments[editId]) ? attachments[editId] : [];
+  return (
+    <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: 10 }}>
+      <label style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:4,display:"block",textTransform:"uppercase",letterSpacing:".05em"}}>Attachments</label>
+      {list.map(function(att, idx) {
+        return React.createElement("div", { key: idx, style: { display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", background: "#f0fdf4", borderRadius: 8, border: "1px solid #bbf7d0", marginBottom: 4 } },
+          React.createElement("span", { style: { flex: 1, fontSize: 12, fontWeight: 500, color: "#166534", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, att.name),
+          React.createElement("button", { onClick: function() { openAttachViewer(att, list, idx); }, style: { background: "#dbeafe", border: "none", borderRadius: 6, padding: "3px 8px", cursor: "pointer", fontSize: 11, color: "#2563eb", fontWeight: 600 } }, "View"),
+          React.createElement("button", { onClick: function() { removeAttachment(editId, idx); }, style: { background: "#fee2e2", border: "none", borderRadius: 6, padding: "3px 8px", cursor: "pointer", fontSize: 11, color: "#dc2626", fontWeight: 600 } }, "Remove")
+        );
+      })}
+      <div style={{ position: "relative", marginTop: list.length > 0 ? 4 : 0 }}>
+        <div style={{ border: "2px dashed #d1d5db", borderRadius: 8, padding: 16, textAlign: "center", cursor: "pointer" }}
+          onDragOver={function(e) { e.preventDefault(); e.currentTarget.style.borderColor = "#3b82f6"; }}
+          onDragLeave={function(e) { e.currentTarget.style.borderColor = "#d1d5db"; }}
+          onDrop={function(e) { e.preventDefault(); e.currentTarget.style.borderColor = "#d1d5db"; if(editId) Array.from(e.dataTransfer.files).forEach(function(f) { uploadAttachment(editId, f); }); }}
+          onClick={function() { var el = document.getElementById("attachFileInput"); if(el) el.click(); }}
+        >
+          {attachLoading
+            ? React.createElement("span", { style: { fontSize: 13, color: "#6b7280" } }, "Uploading...")
+            : React.createElement("div", null,
+                React.createElement("div", { style: { fontSize: 20, marginBottom: 4 } }, "+"),
+                React.createElement("div", { style: { fontSize: 12, color: "#6b7280" } }, "Drop files here or ", React.createElement("span", { style: { color: "#3b82f6", fontWeight: 600 } }, "browse")),
+                React.createElement("div", { style: { fontSize: 10, color: "#9ca3af", marginTop: 2 } }, "PDF, PNG, JPG up to 10MB")
+              )
+          }
+        </div>
+        <input id="attachFileInput" type="file" accept=".pdf,.png,.jpg,.jpeg" multiple style={{ display: "none" }} onChange={function(e) { if(editId) Array.from(e.target.files).forEach(function(f) { uploadAttachment(editId, f); }); e.target.value = ""; }} />
+      </div>
+    </div>
+  );
+}
+
 function Modal({open,onClose,children}) {
   if(!open) return null;
   return (
@@ -350,6 +789,66 @@ function PaymentDashboard({ onLogout, userName }) {
   var [selDay, setSelDay] = useState(null);  // "2026-03-04" or null
   var [showAdd, setShowAdd] = useState(false);
   var [editId, setEditId] = useState(null);
+  var [attachments, setAttachments] = useState({});  // { payId: [ {name, driveItemId, webUrl, downloadUrl}, ... ] }
+  var [attachLoading, setAttachLoading] = useState(false);
+  var [viewAttach, setViewAttach] = useState(null);  // { name, downloadUrl, driveItemId }
+  var [viewBlobUrl, setViewBlobUrl] = useState(null);
+  var [viewLoading, setViewLoading] = useState(false);
+  var [viewAttachList, setViewAttachList] = useState([]);  // all attachments for cycling
+  var [viewAttachIdx, setViewAttachIdx] = useState(0);
+
+  async function loadAttachBlob(info) {
+    setViewBlobUrl(null);
+    setViewLoading(true);
+    try {
+      var token = await getToken();
+      var resp = await fetch('https://graph.microsoft.com/v1.0/drives/' + SP.driveId + '/items/' + info.driveItemId + '/content', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (!resp.ok) throw new Error('Failed to fetch file');
+      var blob = await resp.blob();
+      var url = URL.createObjectURL(blob);
+      setViewBlobUrl(url);
+    } catch(e) {
+      console.error('Fetch attachment:', e);
+      alert('Could not load preview: ' + e.message);
+    } finally {
+      setViewLoading(false);
+    }
+  }
+
+  async function openAttachViewer(info, list, idx) {
+    setViewAttach(info);
+    setViewAttachList(list || [info]);
+    setViewAttachIdx(idx || 0);
+    loadAttachBlob(info);
+  }
+
+  function viewAttachNav(dir) {
+    var newIdx = viewAttachIdx + dir;
+    if (newIdx < 0 || newIdx >= viewAttachList.length) return;
+    if (viewBlobUrl) URL.revokeObjectURL(viewBlobUrl);
+    var info = viewAttachList[newIdx];
+    setViewAttach(info);
+    setViewAttachIdx(newIdx);
+    loadAttachBlob(info);
+  }
+
+  function closeAttachViewer() {
+    if (viewBlobUrl) URL.revokeObjectURL(viewBlobUrl);
+    setViewBlobUrl(null);
+    setViewAttach(null);
+  }
+
+  function downloadAttach() {
+    if (!viewBlobUrl || !viewAttach) return;
+    var a = document.createElement('a');
+    a.href = viewBlobUrl;
+    a.download = viewAttach.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
   var [showEmp, setShowEmp] = useState(false);
   var [checkId, setCheckId] = useState(null);
   var [showRec, setShowRec] = useState(false);
@@ -358,6 +857,9 @@ function PaymentDashboard({ onLogout, userName }) {
   var [showFc, setShowFc] = useState(false);
   var [noteId, setNoteId] = useState(null);
   var [ready, setReady] = useState(false);
+  useEffect(function() { paymentsRef.current = payments; }, [payments]);
+  useEffect(function() { updateClosedDays(officeClosed, cy >= 2020 ? cy : new Date().getFullYear()); }, [officeClosed, cy]);
+  useEffect(function() { _zmanLoc = zmanLoc; }, [zmanLoc]);
   var [tab, setTab] = useState("action");
   var [saveStatus, setSaveStatus] = useState("saved");
   var [selected, setSelected] = useState({});  // { payId: true }
@@ -373,7 +875,10 @@ function PaymentDashboard({ onLogout, userName }) {
   var [editEmpF, setEditEmpF] = useState(null);          // edit form data for employee
   var [searchQ, setSearchQ] = useState("");               // global search query
   var [copied, setCopied] = useState(false);              // clipboard copied feedback
-  var [skipUntil, setSkipUntil] = useState({});            // { payId: "2026-03-15" }
+  var [skipUntil, setSkipUntil] = useState({});
+  var [officeClosed, setOfficeClosed] = useState({});  // { "2026-03-15": "reason" }
+  var [zmanLoc, setZmanLoc] = useState({ name: "New York", lat: 40.7128, lng: -74.006, tz: -5 });  // candle lighting location
+  var [showZmanPicker, setShowZmanPicker] = useState(false);            // { payId: "2026-03-15" }
   var [skipPickId, setSkipPickId] = useState(null);        // payment id for skip date picker
   var [skipPickDate, setSkipPickDate] = useState("");      // date value in picker
   var [showShare, setShowShare] = useState(false);         // share summary modal
@@ -384,6 +889,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
   var cfgTimer = useRef(null);
   var refreshTimer = useRef(null);
+  var paymentsRef = useRef({});
 
   /* ══════ LOAD + ENSURE + BG REFRESH ══════ */
   async function fullLoad(currentTmpls, currentEmps, viewY, viewM) {
@@ -429,9 +935,13 @@ function PaymentDashboard({ onLogout, userName }) {
         if (cfg.balDate !== today) setEditBal(true); // auto-open balance editor
         setEmps(e); setTmpls(t);
         if (cfg.skipUntil) setSkipUntil(cfg.skipUntil);
+        if (cfg.officeClosed) setOfficeClosed(cfg.officeClosed);
+        if (cfg.zmanLoc) setZmanLoc(cfg.zmanLoc);
+        updateClosedDays(cfg.officeClosed || {}, new Date().getFullYear());
 
         var payMap = await fullLoad(t, e, cy, cm);
         setPayments(payMap);
+        hydrateAttachmentsFromPayments(payMap);
       } catch(e) { console.error('Load failed:', e); }
       setReady(true);
     })();
@@ -447,6 +957,7 @@ function PaymentDashboard({ onLogout, userName }) {
     (async function() {
       var payMap = await fullLoad(tmpls, emps, cy, cm);
       setPayments(payMap);
+      hydrateAttachmentsFromPayments(payMap);
     })();
   }, [cy, cm, ready]);
 
@@ -460,6 +971,7 @@ function PaymentDashboard({ onLogout, userName }) {
     (async function() {
       var payMap = await fullLoad(tmpls, emps, cy, cm);
       setPayments(payMap);
+      hydrateAttachmentsFromPayments(payMap);
     })();
   }, [tmpls, emps, ready]);
 
@@ -470,6 +982,7 @@ function PaymentDashboard({ onLogout, userName }) {
       try {
         var payMap = await spLoadAllPay();
         setPayments(payMap);
+        hydrateAttachmentsFromPayments(payMap);
         console.log('BG refresh:', Object.keys(payMap).length, 'payments');
       } catch(e) { console.error('BG refresh failed:', e); }
     }, 60000);
@@ -484,10 +997,10 @@ function PaymentDashboard({ onLogout, userName }) {
     if (cfgTimer.current) clearTimeout(cfgTimer.current);
     setSaveStatus("saving");
     cfgTimer.current = setTimeout(async function() {
-      try { await spSaveConfig({ bal: bal, balDate: getToday(), emps: emps, tmpls: tmpls, skipUntil: skipUntil }); setSaveStatus("saved"); }
+      try { await spSaveConfig({ bal: bal, balDate: getToday(), emps: emps, tmpls: tmpls, skipUntil: skipUntil, officeClosed: officeClosed, zmanLoc: zmanLoc }); setSaveStatus("saved"); }
       catch(e) { console.error('Save config:', e); setSaveStatus("error"); }
     }, 1500);
-  }, [bal, emps, tmpls, skipUntil, ready]);
+  }, [bal, emps, tmpls, skipUntil, officeClosed, zmanLoc, ready]);
 
   /* ══════ SEARCH FILTER ══════ */
 
@@ -630,20 +1143,44 @@ function PaymentDashboard({ onLogout, userName }) {
   }, [showFc,fcFrom,fcTo,allPayments,tmpls,emps,bal,payments]);
 
   /* ══════ CALENDAR ══════ */
+  var jewishHols = useMemo(function() { return Object.assign({}, getJewishHolidays(cy), getJewishHolidays(cy+1)); }, [cy]);
+
   var calDays = useMemo(function() {
     var days = [], dm = daysIn(cy,cm), first = new Date(cy,cm,1).getDay();
     for(var i=0;i<first;i++) days.push(null);
     for(var d=1;d<=dm;d++) {
       var ds = cy+"-"+pad(cm+1)+"-"+pad(d);
-      // Include payments whose effective due (weekend→Friday) lands on this day
       var monthPay = allPayments.filter(function(p){return effDue(p.dueDate)===ds || p.dueDate===ds;});
       var due = monthPay.filter(function(p){return p.status===UNPAID;}).reduce(function(s,p){return s+effAmt(p);},0);
       var cnt = monthPay.filter(function(p){return p.status===UNPAID;}).length;
       var hp = monthPay.some(function(p){return p.isPayroll && p.status!==CLEARED;});
-      days.push({day:d,ds:ds,due:due,cnt:cnt,hp:hp});
+      var heb = gregToHebrew(cy, cm, d);
+      var hebStr = heb.day + " " + hebrewMonthName(heb.month);
+      var hebDay = heb.day;
+      var hebMonth = hebrewMonthName(heb.month);
+      var holiday = jewishHols[ds] || null;
+      var isClosed = !!_closedDays[ds];
+      var isWknd = (new Date(cy,cm,d).getDay() === 0 || new Date(cy,cm,d).getDay() === 6);
+      var dayOfWeek = new Date(cy,cm,d).getDay();
+      var isFri = dayOfWeek === 5;
+      var isSat = dayOfWeek === 6;
+      // Parsha on Friday and Saturday
+      var parsha = isFri ? getParshaForShabbat(cy, cm, d + 1) : isSat ? getParshaForShabbat(cy, cm, d) : "";
+      var candle = "";
+      // Candle lighting on Friday
+      if (isFri) {
+        candle = getCandleLighting(cy, cm, d, zmanLoc);
+      }
+      // Also show candle lighting on Yom Tov eve (day before major holiday)
+      var tomorrow = cy+"-"+pad(cm+1)+"-"+pad(d+1 <= daysIn(cy,cm) ? d+1 : 1);
+      if (!isFri && jewishHols[tomorrow] && OFFICE_CLOSED_HOLIDAYS.indexOf(jewishHols[tomorrow]) !== -1) {
+        candle = getCandleLighting(cy, cm, d, zmanLoc);
+      }
+      var fastInfo = getFastTimes(cy, cm, d);
+      days.push({day:d,ds:ds,due:due,cnt:cnt,hp:hp,heb:hebStr,hebDay:hebDay,hebMonth:hebMonth,hebYear:heb.year,holiday:holiday,isClosed:isClosed,isWknd:isWknd,parsha:parsha,candle:candle,fastInfo:fastInfo});
     }
     return days;
-  }, [cy,cm,allPayments]);
+  }, [cy,cm,allPayments,officeClosed,zmanLoc]);
 
   var dayItems = useMemo(function() {
     if (!selDay) return [];
@@ -848,9 +1385,116 @@ function PaymentDashboard({ onLogout, userName }) {
     setCcDismissed(function(prev) { var n = Object.assign({}, prev); n[tName] = true; return n; });
   }
 
+  // Attachment functions
+  async function uploadAttachment(payId, file) {
+    setAttachLoading(true);
+    try {
+      console.log('Uploading attachment for', payId, file.name);
+      var info = await spUploadAttachment(payId, file);
+      console.log('Upload success:', info);
+      var newList = (attachments[payId] || []).concat([info]);
+      setAttachments(function(prev) { var n = Object.assign({}, prev); n[payId] = newList; return n; });
+      // Persist to SP list item
+      saveAttachDataToSP(payId, newList);
+    } catch(e) { console.error('Upload failed:', e); alert('Upload failed: ' + e.message); }
+    setAttachLoading(false);
+  }
+
+  function saveAttachDataToSP(payId, attachList) {
+    // Find payment's _spId and update AttachData field
+    var p = paymentsRef.current[payId];
+    if (p && p._spId) {
+      var data = attachList.map(function(a) { return { name: a.name, driveItemId: a.driveItemId, webUrl: a.webUrl }; });
+      console.log('Saving AttachData for', payId, 'spId:', p._spId, 'items:', data.length);
+      spUpdatePay(p._spId, { AttachData: JSON.stringify(data) }).then(function() {
+        console.log('AttachData saved successfully for', payId);
+      }).catch(function(e) { console.warn('Save attach data failed:', e); });
+    } else {
+      console.warn('saveAttachDataToSP: no payment or _spId for', payId, 'payment:', p);
+    }
+  }
+
+  async function checkAttachment(payId) {
+    var info = await spGetAttachment(payId);
+    if (info) {
+      setAttachments(function(prev) { var n = Object.assign({}, prev); n[payId] = [info]; return n; });
+    }
+    return info;
+  }
+
+  function hydrateAttachmentsFromPayments(payMap) {
+    var map = {};
+    var total = Object.keys(payMap).length;
+    var withData = 0;
+    Object.keys(payMap).forEach(function(id) {
+      var p = payMap[id];
+      if (p.attachData) {
+        withData++;
+        try {
+          var arr = JSON.parse(p.attachData);
+          if (arr && arr.length > 0) map[id] = arr;
+        } catch(e) { console.warn('Bad attachData JSON for', id, p.attachData); }
+      }
+    });
+    if (Object.keys(map).length > 0) {
+      setAttachments(function(prev) { return Object.assign({}, prev, map); });
+    }
+    console.log('Attachments hydrated:', Object.keys(map).length, 'of', total, 'payments.', withData, 'had attachData field');
+  }
+
+  async function loadAllAttachments() {
+    if (!SP.driveId) {
+      try { var dr = await gFetch('/sites/' + SP.siteId + '/drive'); SP.driveId = dr.id; } catch(e) { return; }
+    }
+    try {
+      var resp = await gFetch('/drives/' + SP.driveId + '/root:/OpsPayAttachments:/children?$top=999');
+      var files = resp.value || [];
+      console.log('Attachment files found:', files.length, files.map(function(f){return f.name;}));
+      var map = {};
+      files.forEach(function(f) {
+        var parts = f.name.split('__');
+        var payId, origName;
+        if (parts.length >= 2) {
+          payId = parts[0];
+          origName = parts.slice(1).join('__').replace(/^[a-z0-9]+_/, '');
+        } else {
+          // Fallback: first segment before _ is payId
+          var idx = f.name.indexOf('_');
+          if (idx > 0) { payId = f.name.substring(0, idx); origName = f.name.substring(idx + 1); }
+          else { return; }
+        }
+        var info = { name: origName, driveItemId: f.id, webUrl: f.webUrl, downloadUrl: f['@microsoft.graph.downloadUrl'] || f.webUrl };
+        if (!map[payId]) map[payId] = [];
+        map[payId].push(info);
+      });
+      if (Object.keys(map).length > 0) {
+        setAttachments(function(prev) { return Object.assign({}, prev, map); });
+      }
+      console.log('Attachments mapped:', Object.keys(map), map);
+    } catch(e) { console.log('No attachments folder yet or error:', e.message); }
+  }
+
+  async function removeAttachment(payId, idx) {
+    var arr = attachments[payId];
+    if (!arr || !arr[idx]) return;
+    var att = arr[idx];
+    if (!confirm('Remove attachment ' + att.name + '?')) return;
+    try {
+      await spDeleteAttachment(att.driveItemId);
+      var newArr = arr.filter(function(_, i) { return i !== idx; });
+      setAttachments(function(prev) {
+        var n = Object.assign({}, prev);
+        if (newArr.length === 0) delete n[payId]; else n[payId] = newArr;
+        return n;
+      });
+      saveAttachDataToSP(payId, newArr);
+    } catch(e) { alert('Delete failed: ' + e.message); }
+  }
+
   function openEdit(p) {
     setEditId(p.id);
     setForm({name:p.name,category:p.category,amount:String(p.amount),dueDate:p.dueDate,autoPay:p.autoPay,checkNum:p.checkNum||"",note:p.note||"",minPay:p.minPay?String(p.minPay):"",closeDay:p.closeDate?String(parseInt(p.closeDate.slice(-2))):""});
+    if (!attachments[p.id]) checkAttachment(p.id);
   }
 
   function saveEdit() {
@@ -949,7 +1593,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
   async function doRefresh() {
     setSaveStatus("saving");
-    try { var m = await spLoadAllPay(); setPayments(m); setSaveStatus("saved"); }
+    try { var m = await spLoadAllPay(); setPayments(m); hydrateAttachmentsFromPayments(m); setSaveStatus("saved"); }
     catch(e) { console.error('Refresh:', e); setSaveStatus("error"); }
   }
 
@@ -1238,6 +1882,7 @@ function PaymentDashboard({ onLogout, userName }) {
         {/* Actions */}
         <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
           <button onClick={function() { setNoteId(p.id); setNoteIn(p.note || ""); }} title="Note" style={smBtn(p.note ? "#f3e8ff" : "#f1f5f9", p.note ? "#7c3aed" : "#64748b")}>📝</button>
+          {attachments[p.id] && attachments[p.id].length > 0 && <button onClick={function() { openAttachViewer(attachments[p.id][0], attachments[p.id], 0); }} title={attachments[p.id].length + " attachment(s)"} style={smBtn("#dbeafe", "#2563eb")}>{attachments[p.id].length > 1 ? "📎" + attachments[p.id].length : "📎"}</button>}
           {sec === "action" && !p.excluded && (
             <button onClick={function() { setSkipPickId(p.id); setSkipPickDate(""); }} title="Skip" style={smBtn("#f1f5f9", "#64748b")}>⏭️</button>
           )}
@@ -1313,7 +1958,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <button onClick={function() { setShowFc(!showFc); }} style={{ padding: "8px 14px", background: showFc ? "rgba(139,92,246,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showFc ? 600 : 400 }}>📊 Forecast</button>
           <button onClick={function() { setShowShare(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>📋 Share Summary</button>
           <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
-          <button onClick={function() { setSaveStatus("saving"); spLoadAllPay().then(function(m) { setPayments(m); setSaveStatus("saved"); }).catch(function() { setSaveStatus("error"); }); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
+          <button onClick={function() { setSaveStatus("saving"); spLoadAllPay().then(function(m) { setPayments(m); hydrateAttachmentsFromPayments(m); setSaveStatus("saved"); }).catch(function() { setSaveStatus("error"); }); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
           <button onClick={function() { if(confirm("Sign out of OpsPay?")) { var a = msalInstance.getAllAccounts(); if(a.length) { msalInstance.logoutPopup({ account: a[0] }).then(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }).catch(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }); } else { localStorage.clear(); sessionStorage.clear(); location.reload(); } }}} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Sign Out</button>
         </div>
       </header>
@@ -1442,7 +2087,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <button onClick={function() { if (!showCal) { var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); } setShowCal(!showCal); }} style={{ background: showCal ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 7px", cursor: "pointer", display: "flex", alignItems: "center" }}>
             <CalIcon size={16} color={showCal ? "#60A5FA" : "#94A3B8"} />
           </button>
-          <span style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>Today</span>
+          <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>Today</span>
           <span style={{ fontSize: 12, color: "#64748B" }}>{fmtS(td)} · {dayN(td)}</span>
           <div style={{ flex: 1 }} />
           {/* Search bar */}
@@ -1470,32 +2115,58 @@ function PaymentDashboard({ onLogout, userName }) {
         {showCal && (
           <div style={{ background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 11, padding: 12, border: "1px solid #e5e7eb", marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <button onClick={function() { navMo(-1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>‹</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button onClick={function() { navMo(-1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: "6px 0 0 6px", padding: "4px 8px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>‹</button>
+                <button onClick={function() { navMo(1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: "0 6px 6px 0", padding: "4px 8px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700, marginLeft: -1 }}>›</button>
+              </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>{MONTHS[cm]} {cy}</span>
+                <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>{MONTHS[cm]} {cy}</span>
+                {(function() { var h1 = gregToHebrew(cy, cm, 1); var h2 = gregToHebrew(cy, cm, daysIn(cy, cm)); var str = h1.month === h2.month ? hebrewMonthName(h1.month) + " " + toHebYear(h1.year) : hebrewMonthName(h1.month) + " / " + hebrewMonthName(h2.month) + " " + toHebYear(h2.year); return <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 500 }}>{str}</span>; })()}
                 <button onClick={function() { var t = new Date(); setCy(t.getFullYear()); setCm(t.getMonth()); setShowCal(false); }} style={{ background: "rgba(59,130,246,.1)", border: "none", borderRadius: 4, padding: "2px 7px", color: "#60A5FA", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>Today</button>
               </div>
-              <button onClick={function() { navMo(1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>›</button>
-              <button onClick={function() { setShowCal(false); setSelDay(null); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#64748b", fontSize: 12, fontWeight: 600, marginLeft: 4 }}>✕</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button onClick={function() { setShowZmanPicker(!showZmanPicker); }} title={"Zmanim: " + zmanLoc.name} style={{ background: showZmanPicker ? "#eff6ff" : "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 7px", cursor: "pointer", fontSize: 10, color: "#64748b" }}>{String.fromCodePoint(0x1F4CD)} {zmanLoc.name}</button>
+                <button onClick={function() { setShowCal(false); setSelDay(null); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#64748b", fontSize: 12, fontWeight: 600 }}>✕</button>
+              </div>
             </div>
+            {showZmanPicker && (
+              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: 10, marginBottom: 8, display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+                <span style={{ fontSize: 10, color: "#64748b", fontWeight: 600, marginRight: 4 }}>{String.fromCodePoint(0x1F56F)} Candle Lighting Location:</span>
+                {ZMAN_CITIES.map(function(city) {
+                  var isSel = zmanLoc.name === city.name;
+                  return React.createElement("button", {
+                    key: city.name,
+                    onClick: function() { setZmanLoc(city); setShowZmanPicker(false); },
+                    style: { padding: "3px 8px", fontSize: 10, fontWeight: isSel ? 700 : 500, background: isSel ? "#3b82f6" : "white", color: isSel ? "white" : "#374151", border: "1px solid " + (isSel ? "#3b82f6" : "#e2e8f0"), borderRadius: 4, cursor: "pointer" }
+                  }, city.name);
+                })}
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2, marginBottom: 2 }}>
-              {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(function(d) { return <div key={d} style={{ textAlign: "center", fontSize: 10, fontWeight: 600, color: "#6b7280", padding: "4px 0" }}>{d}</div>; })}
+              {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map(function(d) { return <div key={d} style={{ textAlign: "center", fontSize: 11, fontWeight: 600, color: "#6b7280", padding: "4px 0" }}>{d}</div>; })}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2 }}>
               {calDays.map(function(c, i) {
                 if (!c) return <div key={"e" + i} />;
                 var isT = c.ds === td;
                 var isSel = c.ds === selDay;
+                var cellBg = isSel ? "#eff6ff" : c.isClosed ? "#fef2f2" : c.isWknd ? "#f1f5f9" : c.holiday ? "#fefce8" : c.due > 0 ? "white" : "#f8fafc";
                 return (
                   <button key={c.ds} onClick={function() { setSelDay(isSel ? null : c.ds); }} style={{
-                    background: isSel ? "#eff6ff" : c.due > 0 ? "white" : "#f8fafc",
-                    border: isSel ? "2px solid #2563eb" : isT ? "2px solid #3b82f6" : "1px solid #e5e7eb",
-                    borderRadius: 6, padding: "3px 2px", cursor: "pointer", textAlign: "center", minHeight: 44,
-                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", gap: 1
+                    background: cellBg,
+                    border: isSel ? "2px solid #2563eb" : isT ? "2px solid #3b82f6" : c.isClosed ? "1px solid #fca5a5" : c.holiday ? "1px solid #fde68a" : "1px solid #e5e7eb",
+                    borderRadius: 6, padding: "3px 2px", cursor: "pointer", textAlign: "center", minHeight: 70,
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", gap: 0, position: "relative"
                   }}>
-                    <div style={{ fontSize: 10, fontWeight: isT || isSel ? 700 : 500, color: isSel ? "#2563eb" : isT ? "#60A5FA" : "#CBD5E1" }}>{c.day}</div>
-                    {c.due > 0 && <div style={{ fontSize: 8, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: c.due > avail ? "#dc2626" : "#94A3B8" }}>{c.due >= 1000 ? "$" + (c.due / 1000).toFixed(1) + "k" : fmt(c.due)}</div>}
-                    {c.hp && <div style={{ width: 4, height: 4, borderRadius: "50%", background: "#3B82F6" }} />}
+                    <div style={{ fontSize: 13, fontWeight: isT || isSel ? 700 : 500, color: isSel ? "#2563eb" : isT ? "#60A5FA" : c.isClosed ? "#dc2626" : "#334155" }}>{c.day}</div>
+                    <div style={{ fontSize: 9, color: "#9ca3af", lineHeight: 1.2, direction: "rtl" }}>{toHebNum(c.hebDay) + " " + c.hebMonth}</div>
+                    {c.holiday && <div style={{ fontSize: 8, color: "#92400e", fontWeight: 600, lineHeight: 1.2, marginTop: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: "0 2px", direction: "rtl" }}>{c.holiday}</div>}
+                    {c.isClosed && !c.isWknd && <div style={{ fontSize: 8, color: "#dc2626", fontWeight: 700, lineHeight: 1.2, marginTop: 1 }}>CLOSED</div>}
+                    {c.parsha && <div style={{ fontSize: 8, color: "#7c3aed", fontWeight: 600, lineHeight: 1.2, marginTop: 1, direction: "rtl" }}>{c.parsha}</div>}
+                    {c.candle && <div style={{ fontSize: 8, color: "#d97706", lineHeight: 1.2, marginTop: 1 }}>{String.fromCodePoint(0x1F56F)}{c.candle}</div>}
+                    {c.fastInfo && <div style={{ fontSize: 8, color: "#dc2626", lineHeight: 1.2 }}>{String.fromCodePoint(0x23F0)}{c.fastInfo.end}</div>}
+                    {c.due > 0 && <div style={{ fontSize: 10, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: c.due > avail ? "#dc2626" : "#64748b", marginTop: 1 }}>{c.due >= 1000 ? "$" + (c.due / 1000).toFixed(1) + "k" : fmt(c.due)}</div>}
+                    {c.hp && <div style={{ width: 3, height: 3, borderRadius: "50%", background: "#3B82F6" }} />}
                   </button>
                 );
               })}
@@ -1508,11 +2179,44 @@ function PaymentDashboard({ onLogout, userName }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ fontSize: 13, fontWeight: 700, color: "#1e40af" }}>{fmtS(selDay)}</span>
                     <span style={{ fontSize: 12, color: "#64748b" }}>{dayN(selDay)}</span>
+                    {(function() { var h = gregToHebrew(parseInt(selDay.slice(0,4)), parseInt(selDay.slice(5,7))-1, parseInt(selDay.slice(8,10))); return <span style={{ fontSize: 11, color: "#9ca3af", direction: "rtl" }}>{toHebNum(h.day) + " " + hebrewMonthName(h.month) + " " + toHebYear(h.year)}</span>; })()}
+                    {jewishHols[selDay] && <span style={{ fontSize: 11, fontWeight: 600, color: "#92400e", background: "#fefce8", padding: "1px 6px", borderRadius: 4, direction: "rtl" }}>{jewishHols[selDay]}</span>}
+                    {(function() {
+                      var sd = parseD(selDay);
+                      var items = [];
+                      if (sd.getDay() === 5) {
+                        var p = getParshaForShabbat(sd.getFullYear(), sd.getMonth(), sd.getDate() + 1);
+                        var cl = getCandleLighting(sd.getFullYear(), sd.getMonth(), sd.getDate(), zmanLoc);
+                        if (p) items.push(React.createElement("span", { key: "p", style: { fontSize: 11, fontWeight: 600, color: "#7c3aed", background: "#f3e8ff", padding: "1px 6px", borderRadius: 4, direction: "rtl" } }, String.fromCodePoint(0x1F4DC) + " " + p));
+                        if (cl) items.push(React.createElement("span", { key: "cl", style: { fontSize: 11, color: "#d97706", background: "#fefce8", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x1F56F) + " " + cl));
+                      }
+                      // Yom Tov eve candle lighting
+                      var tmrw = new Date(sd.getTime() + 86400000);
+                      var tmrwKey = toISO(tmrw);
+                      if (sd.getDay() !== 5 && jewishHols[tmrwKey] && OFFICE_CLOSED_HOLIDAYS.indexOf(jewishHols[tmrwKey]) !== -1) {
+                        var cl2 = getCandleLighting(sd.getFullYear(), sd.getMonth(), sd.getDate(), zmanLoc);
+                        if (cl2) items.push(React.createElement("span", { key: "cl2", style: { fontSize: 11, color: "#d97706", background: "#fefce8", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x1F56F) + " " + cl2));
+                      }
+                      var fi = getFastTimes(sd.getFullYear(), sd.getMonth(), sd.getDate());
+                      if (fi) items.push(React.createElement("span", { key: "fi", style: { fontSize: 11, color: "#dc2626", background: "#fee2e2", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x23F0) + " Fast ends " + fi.end));
+                      if (items.length === 0) return null;
+                      return React.createElement("span", { style: { display: "flex", gap: 6, alignItems: "center" } }, items);
+                    })()}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a" }}>{fmt(dayItems.reduce(function(s,p){return s+effAmt(p);},0))}</span>
                     <span style={{ fontSize: 11, color: "#94a3b8" }}>{dayItems.length} items</span>
                     <button onClick={function() { toggleSelAll(dayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(dayItems) ? "Deselect all" : "Select all"}</button>
+                    {(function() {
+                      var wd = new Date(parseInt(selDay.slice(0,4)), parseInt(selDay.slice(5,7))-1, parseInt(selDay.slice(8,10))).getDay();
+                      if (wd === 0 || wd === 6) return null;
+                      var closed = !!officeClosed[selDay];
+                      return <button onClick={function() {
+                        var oc = Object.assign({}, officeClosed);
+                        if (closed) { delete oc[selDay]; } else { oc[selDay] = "Office Closed"; }
+                        setOfficeClosed(oc);
+                      }} style={{ background: closed ? "#fee2e2" : "#f0fdf4", border: "1px solid " + (closed ? "#fca5a5" : "#bbf7d0"), borderRadius: 4, padding: "2px 8px", cursor: "pointer", color: closed ? "#dc2626" : "#16a34a", fontSize: 10, fontWeight: 600 }}>{closed ? "Reopen Office" : "Mark Closed"}</button>;
+                    })()}
                     <button onClick={function() { setSelDay(null); }} style={{ background: "#f1f5f9", border: "none", borderRadius: 4, padding: "2px 6px", cursor: "pointer", color: "#64748b", fontSize: 11 }}>✕</button>
                   </div>
                 </div>
@@ -1797,12 +2501,63 @@ function PaymentDashboard({ onLogout, userName }) {
           <div><Label text="Due Date" /><input style={inputS} type="date" value={form.dueDate} onChange={function(e) { setForm(Object.assign({}, form, { dueDate: e.target.value })); }} /></div>
           <div><Label text="Check #" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} value={form.checkNum} onChange={function(e) { setForm(Object.assign({}, form, { checkNum: e.target.value })); }} placeholder="Optional" /></div>
           <div><Label text="Note" /><textarea style={Object.assign({}, inputS, { minHeight: 45, resize: "vertical" })} value={form.note} onChange={function(e) { setForm(Object.assign({}, form, { note: e.target.value })); }} /></div>
+          <AttachSection editId={editId} attachments={attachments} attachLoading={attachLoading} openAttachViewer={openAttachViewer} removeAttachment={removeAttachment} uploadAttachment={uploadAttachment} />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={function() { setEditId(null); }} style={btnSecondary}>Cancel</button>
             <button onClick={saveEdit} style={btnPrimary}>Save</button>
           </div>
         </div>
       </Modal>
+
+            {/* Attachment Viewer - Centered modal */}
+      {viewAttach && (
+        <div onClick={closeAttachViewer} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 10000, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }}>
+          <div onClick={function(e) { e.stopPropagation(); }} style={{ background: "white", borderRadius: 12, width: "100%", maxWidth: 720, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 25px 60px rgba(0,0,0,0.4)", overflow: "hidden" }}>
+            {/* Header bar */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid #e2e8f0", flexShrink: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1 }}>
+                <span style={{ fontSize: 16, flexShrink: 0 }}>{viewAttach.name.toLowerCase().endsWith(".pdf") ? "📄" : "🖼️"}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "#0f172a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{viewAttach.name}</span>
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                {viewAttachList.length > 1 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, marginRight: 4 }}>
+                    <button onClick={function() { viewAttachNav(-1); }} disabled={viewAttachIdx === 0} style={{ padding: "3px 8px", background: viewAttachIdx === 0 ? "#f1f5f9" : "#e2e8f0", border: "none", borderRadius: 4, cursor: viewAttachIdx === 0 ? "default" : "pointer", fontSize: 12, color: viewAttachIdx === 0 ? "#cbd5e1" : "#334155" }}>◀</button>
+                    <span style={{ fontSize: 11, color: "#64748b", minWidth: 30, textAlign: "center" }}>{viewAttachIdx + 1}/{viewAttachList.length}</span>
+                    <button onClick={function() { viewAttachNav(1); }} disabled={viewAttachIdx >= viewAttachList.length - 1} style={{ padding: "3px 8px", background: viewAttachIdx >= viewAttachList.length - 1 ? "#f1f5f9" : "#e2e8f0", border: "none", borderRadius: 4, cursor: viewAttachIdx >= viewAttachList.length - 1 ? "default" : "pointer", fontSize: 12, color: viewAttachIdx >= viewAttachList.length - 1 ? "#cbd5e1" : "#334155" }}>▶</button>
+                  </div>
+                )}
+                <a href={viewAttach.webUrl || "#"} target="_blank" rel="noopener" style={{ padding: "5px 12px", background: "#10b981", color: "white", borderRadius: 6, fontSize: 11, fontWeight: 600, textDecoration: "none" }}>📎 SharePoint</a>
+                <button onClick={downloadAttach} style={{ padding: "5px 12px", background: "#3b82f6", color: "white", border: "none", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>⬇️ Download</button>
+                <button onClick={closeAttachViewer} style={{ background: "none", border: "none", color: "#64748b", fontSize: 20, cursor: "pointer", padding: "2px 6px", lineHeight: 1 }}>✕</button>
+              </div>
+            </div>
+            {/* Preview area */}
+            <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+              {viewLoading ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 400 }}>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ width: 40, height: 40, border: "4px solid #e2e8f0", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "spin 1s linear infinite", margin: "0 auto 12px" }} />
+                    <p style={{ color: "#64748b", fontSize: 13 }}>Loading preview...</p>
+                  </div>
+                </div>
+              ) : viewBlobUrl ? (
+                viewAttach.name.toLowerCase().endsWith(".pdf") ? (
+                  <iframe src={viewBlobUrl} style={{ width: "100%", height: "calc(85vh - 52px)", border: "none", display: "block" }} />
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#f8fafc" }}>
+                    <img src={viewBlobUrl} style={{ maxWidth: "100%", maxHeight: "calc(85vh - 92px)", objectFit: "contain" }} alt={viewAttach.name} />
+                  </div>
+                )
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 300 }}>
+                  <p style={{ color: "#94a3b8" }}>Could not load preview</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add Recurring */}
       <Modal open={showRec} onClose={function() { setShowRec(false); }}>
@@ -2039,6 +2794,17 @@ function PaymentDashboard({ onLogout, userName }) {
       }, []);
 
       useEffect(function() {
+        (async function() {
+          try {
+            var result = await msalReady;
+            var accounts = msalInstance.getAllAccounts();
+            if (result && result.account) { setUser(result.account); }
+            else if (accounts.length > 0) { setUser(accounts[0]); }
+          } catch (e) { console.error('Redirect:', e); setError('Login: ' + e.message); }
+        })();
+      }, []);
+
+      useEffect(function() {
         if (!user) return;
         (async function() {
           try { await initSP(); setSpReady(true); }
@@ -2048,11 +2814,10 @@ function PaymentDashboard({ onLogout, userName }) {
 
       var handleLogin = async function() {
         setAuthLoading(true);
-        try { var r = await msalInstance.loginPopup(loginRequest); setUser(r.account); }
-        catch (e) { setError('Login: ' + e.message); }
-        finally { setAuthLoading(false); }
+        try { await msalInstance.loginRedirect(loginRequest); }
+        catch (e) { setError('Login: ' + e.message); setAuthLoading(false); }
       };
-      var handleLogout = async function() { await msalInstance.logoutPopup(); setUser(null); setSpReady(false); };
+      var handleLogout = async function() { await msalInstance.logoutRedirect(); setUser(null); setSpReady(false); };
 
       if (authLoading) return (
         <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 12 }}>
