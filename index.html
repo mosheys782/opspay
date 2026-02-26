@@ -805,13 +805,24 @@ function PaymentDashboard({ onLogout, userName }) {
       var resp = await fetch('https://graph.microsoft.com/v1.0/drives/' + SP.driveId + '/items/' + info.driveItemId + '/content', {
         headers: { 'Authorization': 'Bearer ' + token }
       });
+      // If 401, force token refresh and retry once
+      if (resp.status === 401) {
+        var a = msalInstance.getAllAccounts();
+        if (a.length > 0) {
+          var tokenResp = await msalInstance.acquireTokenSilent({ scopes: ['Sites.ReadWrite.All'], account: a[0], forceRefresh: true });
+          token = tokenResp.accessToken;
+          resp = await fetch('https://graph.microsoft.com/v1.0/drives/' + SP.driveId + '/items/' + info.driveItemId + '/content', {
+            headers: { 'Authorization': 'Bearer ' + token }
+          });
+        }
+      }
       if (!resp.ok) throw new Error('Failed to fetch file');
       var blob = await resp.blob();
       var url = URL.createObjectURL(blob);
       setViewBlobUrl(url);
     } catch(e) {
       console.error('Fetch attachment:', e);
-      alert('Could not load preview: ' + e.message);
+      setViewBlobUrl(null);
     } finally {
       setViewLoading(false);
     }
