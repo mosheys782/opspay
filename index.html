@@ -517,11 +517,16 @@ function PaymentDashboard({ onLogout, userName }) {
   }, [ready, payments]);
 
   function skipWithDate(id, untilDate) {
-    // Mark as excluded
-    spUpdate(id, { Excluded: true });
-    // Store the unskip date if provided
+    var p = payments[id];
+    // Mark as excluded if not already
+    if (!p || !p.excluded) {
+      spUpdate(id, { Excluded: true });
+    }
+    // Store or clear the unskip date
     if (untilDate) {
       setSkipUntil(function(prev) { var n = Object.assign({}, prev); n[id] = untilDate; return n; });
+    } else {
+      setSkipUntil(function(prev) { var n = Object.assign({}, prev); delete n[id]; return n; });
     }
     setSkipPickId(null);
     setSkipPickDate("");
@@ -1237,7 +1242,10 @@ function PaymentDashboard({ onLogout, userName }) {
             <button onClick={function() { setSkipPickId(p.id); setSkipPickDate(""); }} title="Skip" style={smBtn("#f1f5f9", "#64748b")}>⏭️</button>
           )}
           {(sec === "action" || sec === "skipped") && p.excluded && (
-            <button onClick={function() { unskipPay(p.id); }} title="Include" style={smBtn("#dbeafe", "#2563eb")}>↩️</button>
+            <button onClick={function() { unskipPay(p.id); }} title="Unskip" style={smBtn("#dbeafe", "#2563eb")}>↩️</button>
+          )}
+          {(sec === "action" || sec === "skipped") && p.excluded && (
+            <button onClick={function() { setSkipPickId(p.id); setSkipPickDate(skipUntil[p.id] || ""); }} title="Change resume date" style={smBtn("#fef3c7", "#d97706")}>⏰</button>
           )}
           {p.isPayroll && !p.checkNum && sec !== "cleared" && (
             <button onClick={function() { setCheckId(p.id); setChkIn(""); }} title="Check #" style={smBtn("#d1fae5", "#059669")}>#️⃣</button>
@@ -1678,7 +1686,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
       {/* Skip with date picker */}
       <Modal open={skipPickId !== null} onClose={function() { setSkipPickId(null); }}>
-        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>⏭️ Skip Payment</h2>
+        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>{skipPickId && payments[skipPickId] && payments[skipPickId].excluded ? "⏰ Change Resume Date" : "⏭️ Skip Payment"}</h2>
         <p style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>{skipPickId && payments[skipPickId] ? payments[skipPickId].name : ""}</p>
         <div style={{ marginBottom: 12 }}>
           <Label text="Auto-resume on (optional)" />
@@ -1687,7 +1695,7 @@ function PaymentDashboard({ onLogout, userName }) {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={function() { setSkipPickId(null); }} style={btnSecondary}>Cancel</button>
-          <button onClick={function() { skipWithDate(skipPickId, skipPickDate || null); }} style={Object.assign({}, btnPrimary, { background: "linear-gradient(135deg,#94a3b8,#64748b)" })}>Skip{skipPickDate ? " until " + fmtS(skipPickDate) : " Indefinitely"}</button>
+          <button onClick={function() { skipWithDate(skipPickId, skipPickDate || null); }} style={Object.assign({}, btnPrimary, { background: "linear-gradient(135deg,#94a3b8,#64748b)" })}>{skipPickId && payments[skipPickId] && payments[skipPickId].excluded ? (skipPickDate ? "Set resume to " + fmtS(skipPickDate) : "Remove resume date") : (skipPickDate ? "Skip until " + fmtS(skipPickDate) : "Skip Indefinitely")}</button>
         </div>
       </Modal>
 
