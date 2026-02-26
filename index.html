@@ -1889,7 +1889,7 @@ function PaymentDashboard({ onLogout, userName }) {
           </div>
         )}
         <div style={{ marginTop: 20, borderTop: "1px solid #E2E8F0", paddingTop: 14 }}>
-          <button onClick={resetAllData} style={{ width: "100%", padding: "10px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, cursor: "pointer", color: "#dc2626", fontSize: 13, fontWeight: 600 }}>🗑️ Reset All Data (start fresh)</button>
+          <button onClick={function() { setShowRec(false); }} style={{ width: "100%", padding: "10px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", color: "#475569", fontSize: 13, fontWeight: 600 }}>Close</button>
         </div>
       </Modal>
 
