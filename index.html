@@ -1185,6 +1185,7 @@ function PaymentDashboard({ onLogout, userName }) {
             {isPast && !isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
             {!isPast && sec === "action" && p.dueDate !== td && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: effDue(p.dueDate) === td && p.dueDate !== td ? "rgba(59,130,246,.1)" : "rgba(148,163,184,.08)", color: effDue(p.dueDate) === td && p.dueDate !== td ? "#2563eb" : "#64748b" }}>{effDue(p.dueDate) === td ? "due " + fmtS(p.dueDate) + " (wknd → Fri)" : "due " + fmtS(p.dueDate)}</span>}
             {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
+            {sec === "skipped" && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.08)", color: "#64748b" }}>due {fmtS(p.dueDate)}</span>}
             {isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped{skipUntil[p.id] ? " → resumes " + fmtS(skipUntil[p.id]) : ""}</span>}
           </div>
 
