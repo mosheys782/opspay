@@ -18,7 +18,6 @@
 </head>
 <body>
   <div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:16px;color:#64748b">Loading...</div></div>
-  <script>window.onerror=function(m,s,l,c,e){document.getElementById("root").innerHTML="<pre style=\"color:red;padding:20px;font-size:12px;white-space:pre-wrap\">ERROR at line "+l+":"+c+"\n"+m+"\n"+(e&&e.stack||"")+"</pre>";return true;};</script>
   <script type="text/babel" data-presets="react">
     const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
@@ -223,23 +222,6 @@
       return { name: file.name, driveItemId: data.id, webUrl: data.webUrl, downloadUrl: data['@microsoft.graph.downloadUrl'] || data.webUrl };
     }
 
-    async function spGetAttachment(payId) {
-      if (!SP.driveId) {
-        try { var dr = await gFetch('/sites/' + SP.siteId + '/drive'); SP.driveId = dr.id; } catch(e) { return null; }
-      }
-      try {
-        var safePre = payId.replace(/[^a-zA-Z0-9\-_]/g, '_');
-        var resp = await gFetch('/drives/' + SP.driveId + '/root:/OpsPayAttachments:/children');
-        var files = (resp.value || []).filter(function(f) { return f.name.startsWith(safePre + '__'); });
-        if (files.length > 0) {
-          var item = files[0];
-          var origName = item.name.split('__').slice(1).join('__') || item.name;
-          return { name: origName, driveItemId: item.id, webUrl: item.webUrl, downloadUrl: item['@microsoft.graph.downloadUrl'] || item.webUrl };
-        }
-      } catch(e) { console.warn('Attachment check:', e); }
-      return null;
-    }
-
     async function spDeleteAttachment(driveItemId) {
       await gFetch('/drives/' + SP.driveId + '/items/' + driveItemId, { method: 'DELETE' });
     }
@@ -378,7 +360,10 @@ function hebrewMonthDays(hy, hm) {
 }
 
 /* Convert Gregorian to Hebrew date */
+var _gregHebCache = {};
 function gregToHebrew(year, month, day) {
+  var gk = year * 10000 + month * 100 + day;
+  if (_gregHebCache[gk]) return _gregHebCache[gk];
   // Use astronomical calculation
   // Reference: 1 Tishrei 5784 = Sep 16, 2023
   var jd = gregorianToJD(year, month + 1, day);
@@ -399,11 +384,15 @@ function gregToHebrew(year, month, day) {
   for (var i = 0; i < monthOrder.length; i++) {
     var md = hebrewMonthDays(hy, monthOrder[i]);
     if (dayOfYear < acc + md) {
-      return { year: hy, month: monthOrder[i], day: dayOfYear - acc + 1 };
+      var r = { year: hy, month: monthOrder[i], day: dayOfYear - acc + 1 };
+      _gregHebCache[gk] = r;
+      return r;
     }
     acc += md;
   }
-  return { year: hy, month: 6, day: 29 }; // fallback
+  var fb = { year: hy, month: 6, day: 29 };
+  _gregHebCache[gk] = fb;
+  return fb;
 }
 
 function gregorianToJD(y, m, d) {
@@ -425,7 +414,9 @@ function hebrewDateStr(year, month, day) {
 }
 
 /* ── Jewish Holidays (fixed Hebrew calendar dates) ── */
+var _jewishHolCache = {};
 function getJewishHolidays(gYear) {
+  if (_jewishHolCache[gYear]) return _jewishHolCache[gYear];
   // Generate holidays for a Gregorian year by checking each day
   var holidays = {};
   // Check each day of the Gregorian year
@@ -493,6 +484,7 @@ function getJewishHolidays(gYear) {
       if (hol) holidays[key] = hol;
     }
   }
+  _jewishHolCache[gYear] = holidays;
   return holidays;
 }
 
@@ -508,7 +500,10 @@ var PARSHIYOS = [
 ];
 
 /* Simple parsha lookup - approximation based on week of year from Simchas Torah */
+var _parshaCache = {};
 function getParshaForShabbat(gYear, gMonth, gDay) {
+  var pk = gYear + "-" + gMonth + "-" + gDay;
+  if (_parshaCache[pk]) return _parshaCache[pk];
   // Find Simchas Torah of current cycle
   var h = gregToHebrew(gYear, gMonth, gDay);
   var hy = h.month >= 7 ? h.year : h.year; // Hebrew year
@@ -538,7 +533,9 @@ function getParshaForShabbat(gYear, gMonth, gDay) {
   
   var weekNum = Math.round((jdShabbat - jdBereishis) / 7);
   if (weekNum < 0 || weekNum >= PARSHIYOS.length) return "";
-  return PARSHIYOS[weekNum] || "";
+  var result = PARSHIYOS[weekNum] || "";
+  _parshaCache[pk] = result;
+  return result;
 }
 
 /* Approximate candle lighting time (18 min before sunset) for NYC area */
@@ -653,7 +650,9 @@ function getFastTimes(gYear, gMonth, gDay) {
 }
 
 /* ── US Bank Holidays (Federal Reserve) ── */
+var _bankHolCache = {};
 function getUSBankHolidays(gYear) {
+  if (_bankHolCache[gYear]) return _bankHolCache[gYear];
   var holidays = {};
   // New Year's Day - Jan 1 (observed prev Fri if Sat, next Mon if Sun)
   holidays[gYear + "-01-01"] = "New Year's Day";
@@ -717,6 +716,7 @@ function getUSBankHolidays(gYear) {
   if (ny.getDay() === 6) holidays[(gYear-1) + "-12-31"] = "New Year's Day (Observed)";
   if (ny.getDay() === 0) holidays[gYear + "-01-02"] = "New Year's Day (Observed)";
   
+  _bankHolCache[gYear] = holidays;
   return holidays;
 }
 
@@ -960,7 +960,8 @@ function PaymentDashboard({ onLogout, userName }) {
   var [noteId, setNoteId] = useState(null);
   var [ready, setReady] = useState(false);
   useEffect(function() { paymentsRef.current = payments; }, [payments]);
-  useEffect(function() { updateClosedDays(officeClosed, cy >= 2020 ? cy : new Date().getFullYear()); }, [officeClosed, cy]);
+  var closedKey = JSON.stringify(officeClosed) + cy;
+  useEffect(function() { updateClosedDays(officeClosed, cy >= 2020 ? cy : new Date().getFullYear()); }, [closedKey]);
   useEffect(function() { _zmanLoc = zmanLoc; }, [zmanLoc]);
   var [tab, setTab] = useState("action");
   var [saveStatus, setSaveStatus] = useState("saved");
@@ -1533,13 +1534,6 @@ function PaymentDashboard({ onLogout, userName }) {
     }
   }
 
-  async function checkAttachment(payId) {
-    var info = await spGetAttachment(payId);
-    if (info) {
-      setAttachments(function(prev) { var n = Object.assign({}, prev); n[payId] = [info]; return n; });
-    }
-    return info;
-  }
 
   function hydrateAttachmentsFromPayments(payMap) {
     var map = {};
@@ -1559,38 +1553,6 @@ function PaymentDashboard({ onLogout, userName }) {
       setAttachments(function(prev) { return Object.assign({}, prev, map); });
     }
     console.log('Attachments hydrated:', Object.keys(map).length, 'of', total, 'payments.', withData, 'had attachData field');
-  }
-
-  async function loadAllAttachments() {
-    if (!SP.driveId) {
-      try { var dr = await gFetch('/sites/' + SP.siteId + '/drive'); SP.driveId = dr.id; } catch(e) { return; }
-    }
-    try {
-      var resp = await gFetch('/drives/' + SP.driveId + '/root:/OpsPayAttachments:/children?$top=999');
-      var files = resp.value || [];
-      console.log('Attachment files found:', files.length, files.map(function(f){return f.name;}));
-      var map = {};
-      files.forEach(function(f) {
-        var parts = f.name.split('__');
-        var payId, origName;
-        if (parts.length >= 2) {
-          payId = parts[0];
-          origName = parts.slice(1).join('__').replace(/^[a-z0-9]+_/, '');
-        } else {
-          // Fallback: first segment before _ is payId
-          var idx = f.name.indexOf('_');
-          if (idx > 0) { payId = f.name.substring(0, idx); origName = f.name.substring(idx + 1); }
-          else { return; }
-        }
-        var info = { name: origName, driveItemId: f.id, webUrl: f.webUrl, downloadUrl: f['@microsoft.graph.downloadUrl'] || f.webUrl };
-        if (!map[payId]) map[payId] = [];
-        map[payId].push(info);
-      });
-      if (Object.keys(map).length > 0) {
-        setAttachments(function(prev) { return Object.assign({}, prev, map); });
-      }
-      console.log('Attachments mapped:', Object.keys(map), map);
-    } catch(e) { console.log('No attachments folder yet or error:', e.message); }
   }
 
   async function removeAttachment(payId, idx) {
@@ -1613,7 +1575,6 @@ function PaymentDashboard({ onLogout, userName }) {
   function openEdit(p) {
     setEditId(p.id);
     setForm({name:p.name,category:p.category,amount:String(p.amount),dueDate:p.dueDate,autoPay:p.autoPay,checkNum:p.checkNum||"",note:p.note||"",minPay:p.minPay?String(p.minPay):"",closeDay:p.closeDate?String(parseInt(p.closeDate.slice(-2))):""});
-    if (!attachments[p.id]) checkAttachment(p.id);
   }
 
   function saveEdit() {
@@ -2290,18 +2251,18 @@ function PaymentDashboard({ onLogout, userName }) {
                 if (!c) return <div key={"e" + i} />;
                 var isT = c.ds === td;
                 var isSel = c.ds === selDay;
-                var cellBg = isSel ? "#eff6ff" : c.bankHol ? "#fef2f2" : c.isClosed ? "#fef2f2" : c.isWknd ? "#f1f5f9" : c.holiday ? "#fefce8" : c.due > 0 ? "white" : "#f8fafc";
+                var cellBg = isSel ? "#eff6ff" : c.bankHol ? "#eff6ff" : c.isClosed ? "#fef2f2" : c.isWknd ? "#f1f5f9" : c.holiday ? "#fefce8" : c.due > 0 ? "white" : "#f8fafc";
                 return (
                   <button key={c.ds} onClick={function() { setSelDay(isSel ? null : c.ds); }} style={{
                     background: cellBg,
-                    border: isSel ? "2px solid #2563eb" : isT ? "2px solid #3b82f6" : c.isClosed ? "1px solid #fca5a5" : c.holiday ? "1px solid #fde68a" : "1px solid #e5e7eb",
+                    border: isSel ? "2px solid #2563eb" : isT ? "2px solid #3b82f6" : c.bankHol ? "1px solid #93c5fd" : c.isClosed ? "1px solid #fca5a5" : c.holiday ? "1px solid #fde68a" : "1px solid #e5e7eb",
                     borderRadius: 6, padding: "3px 2px", cursor: "pointer", textAlign: "center", minHeight: 70,
                     display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", gap: 0, position: "relative"
                   }}>
                     <div style={{ fontSize: 13, fontWeight: isT || isSel ? 700 : 500, color: isSel ? "#2563eb" : isT ? "#60A5FA" : c.isClosed ? "#dc2626" : "#334155" }}>{c.day}</div>
                     <div style={{ fontSize: 9, color: "#9ca3af", lineHeight: 1.2, direction: "rtl" }}>{toHebNum(c.hebDay) + " " + c.hebMonth}</div>
                     {c.holiday && <div style={{ fontSize: 8, color: "#92400e", fontWeight: 600, lineHeight: 1.2, marginTop: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: "0 2px", direction: "rtl" }}>{c.holiday}</div>}
-                    {c.bankHol && <div style={{ fontSize: 7, color: "#b91c1c", fontWeight: 600, lineHeight: 1.1, marginTop: 1 }}>{"\uD83C\uDFE6"} {c.bankHol}</div>}
+                    {c.bankHol && <div style={{ fontSize: 7, color: "#1e40af", fontWeight: 600, lineHeight: 1.1, marginTop: 1 }}>{"\uD83C\uDFE6"} {c.bankHol}</div>}
                     {c.isClosed && !c.isWknd && !c.bankHol && <div style={{ fontSize: 8, color: "#dc2626", fontWeight: 700, lineHeight: 1.2, marginTop: 1 }}>CLOSED</div>}
                     {c.parsha && <div style={{ fontSize: 8, color: "#7c3aed", fontWeight: 600, lineHeight: 1.2, marginTop: 1, direction: "rtl" }}>{c.parsha}</div>}
                     {c.candle && <div style={{ fontSize: 8, color: "#d97706", lineHeight: 1.2, marginTop: 1 }}>{String.fromCodePoint(0x1F56F)}{c.candle}</div>}
