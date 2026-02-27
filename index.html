@@ -83,6 +83,8 @@
       { name: 'MonthKey', text: {} },
       { name: 'Varies', boolean: {} },
       { name: 'AttachData', text: { allowMultipleLines: true, maxLength: 0 } },
+      { name: 'IsReminder', boolean: {} },
+      { name: 'PayCard', text: {} },
     ];
 
     async function ensureList(name, extraCols) {
@@ -175,6 +177,7 @@
         CloseDate: p.closeDate || '', UseMin: !!p.useMin,
         MonthKey: p.dueDate ? p.dueDate.substring(0, 7) : '', Varies: !!p.varies,
         AttachData: p.attachData || '',
+        IsReminder: !!p.isReminder, PayCard: p.payCard || '',
       };
     }
     function fieldsToPay(f, spId) {
@@ -186,6 +189,7 @@
         minPay: f.MinPay || 0, closeDate: f.CloseDate || '', useMin: !!f.UseMin,
         varies: !!f.Varies,
         attachData: f.AttachData || '',
+        isReminder: !!f.IsReminder, payCard: f.PayCard || '',
       };
     }
 
@@ -261,7 +265,7 @@ function daysIn(y,m) { return new Date(y,m+1,0).getDate(); }
 function fmtS(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}); }
 function dayN(s) { return parseD(s).toLocaleDateString("en-US",{weekday:"long"}); }
 function overdueTxt(s) { var eff=effDue(s); var diff=Math.floor((new Date(getToday()+"T12:00:00")-new Date(eff+"T12:00:00"))/86400000); if(diff===1) return "1 day overdue"; if(diff>1) return diff+" days overdue"; return "due today"; }
-function effAmt(p) { if(p.category==="Credit Card"&&p.useMin&&p.minPay>0) return p.minPay; return p.amount; }
+function effAmt(p) { if(p.isReminder) return 0; if(p.category==="Credit Card"&&p.useMin&&p.minPay>0) return p.minPay; return p.amount; }
 /* If due date falls on Sat, Sun, holiday, or office-closed day, effective due is the prior business day */
 function effDue(dueDate) {
   var d = parseD(dueDate);
@@ -538,6 +542,80 @@ function getParshaForShabbat(gYear, gMonth, gDay) {
   return result;
 }
 
+/* ── Special Shabbosos ── */
+function getSpecialShabbos(gYear, gMonth, gDay) {
+  // gMonth is 0-indexed. Returns array of special names in Hebrew.
+  var specials = [];
+  var h = gregToHebrew(gYear, gMonth, gDay);
+  var hy = h.year, hm = h.month, hd = h.day;
+
+  // Shabbos Mevorchim — Shabbos before Rosh Chodesh (except before Tishrei)
+  // If this Shabbos's Hebrew month is NOT Elul (month 6) leading into Tishrei,
+  // and the upcoming Rosh Chodesh is within the next 6 days
+  var daysInCurMonth = hebrewMonthDays(hy, hm);
+  if (hd >= daysInCurMonth - 6 && hd <= daysInCurMonth) {
+    // Next month's Rosh Chodesh is coming. Check it's not Tishrei.
+    var nextHm = hm;
+    if (hm === 6) { /* Elul -> Tishrei: no mevorchim */ }
+    else if (hm === 12 && !isHebrewLeapYear(hy)) { nextHm = 1; specials.push("שבת מברכים"); }
+    else if (hm === 13) { nextHm = 1; specials.push("שבת מברכים"); }
+    else { specials.push("שבת מברכים"); }
+  }
+
+  // Shabbos Shuvah — between Rosh Hashanah and Yom Kippur (3-9 Tishrei)
+  if (hm === 7 && hd >= 3 && hd <= 9) specials.push("שבת שובה");
+
+  // Shabbos HaGadol — Shabbos before Pesach (8-14 Nisan)
+  if (hm === 1 && hd >= 8 && hd <= 14) specials.push("שבת הגדול");
+
+  // Shabbos Chazon — Shabbos before Tisha B'Av (2-8 Av)
+  if (hm === 5 && hd >= 2 && hd <= 8) specials.push("שבת חזון");
+
+  // Shabbos Nachamu — Shabbos after Tisha B'Av (10-16 Av)
+  if (hm === 5 && hd >= 10 && hd <= 16) specials.push("שבת נחמו");
+
+  // Four Parshiyos: Shekalim, Zachor, Parah, HaChodesh
+  // These depend on when Purim/Adar falls. We need 1 Adar (or Adar II in leap year)
+  var adarMonth = isHebrewLeapYear(hy) ? 13 : 12;
+
+  // Shekalim: Shabbos on or before 1 Adar (or Adar II)
+  // If 1 Adar is Shabbos, it's Shekalim. Otherwise the Shabbos before.
+  if (hm === adarMonth && hd === 1) specials.push("שבת שקלים");
+  if (hm === (adarMonth === 13 ? 12 : 11)) {
+    // Previous month - check if this is the last Shabbos and 1 Adar is within next 6 days
+    var dm2 = hebrewMonthDays(hy, hm);
+    var daysUntilAdar1 = dm2 - hd; // days until end of month
+    if (daysUntilAdar1 >= 0 && daysUntilAdar1 < 7) {
+      // Check that 1 Adar is NOT Shabbos (otherwise 1 Adar itself gets it)
+      // Compute day-of-week of 1 Adar
+      var jd1Adar = hebrewNewYearJD(hy);
+      var monthOrder2 = [7,8,9,10,11,12];
+      if (isHebrewLeapYear(hy)) monthOrder2.push(13);
+      monthOrder2 = monthOrder2.concat([1,2,3,4,5,6]);
+      var acc2 = 0;
+      for (var mi = 0; mi < monthOrder2.length; mi++) {
+        if (monthOrder2[mi] === adarMonth) break;
+        acc2 += hebrewMonthDays(hy, monthOrder2[mi]);
+      }
+      jd1Adar += acc2;
+      var dow1Adar = Math.round(jd1Adar + 1.5) % 7; // 0=Sun..6=Sat
+      if (dow1Adar !== 6) specials.push("שבת שקלים");
+    }
+  }
+
+  // Zachor: Shabbos before Purim (14 Adar). So 8-13 Adar
+  if (hm === adarMonth && hd >= 8 && hd <= 13) specials.push("שבת זכור");
+
+  // Parah: 2nd Shabbos before 1 Nisan. Roughly 15-21 Adar
+  if (hm === adarMonth && hd >= 15 && hd <= 21) specials.push("שבת פרה");
+
+  // HaChodesh: Shabbos on or before 1 Nisan. 24-29/30 Adar or 1 Nisan
+  if (hm === 1 && hd === 1) specials.push("שבת החודש");
+  if (hm === adarMonth && hd >= 23 && hd <= hebrewMonthDays(hy, adarMonth)) specials.push("שבת החודש");
+
+  return specials;
+}
+
 /* Approximate candle lighting time (18 min before sunset) for NYC area */
 /* Uses a simplified solar calculation */
 /* Zmanim location presets */
@@ -775,7 +853,8 @@ function genExpected(year, month, tmpls, emps) {
       id: "r-"+mk+"-"+t.name, name: t.name, category: t.category, amount: t.amount,
       minPay: isCC?(t.minPay||0):0, closeDate: isCC?mk+"-"+pad(Math.min(t.closeDay||1,dm)):"",
       useMin: false, dueDate: dueDate, autoPay: t.autoPay, varies: t.varies||false,
-      status: UNPAID, checkNum: "", isPayroll: false, empName: "", excluded: false, note: ""
+      status: UNPAID, checkNum: "", isPayroll: false, empName: "", excluded: false, note: "",
+      isReminder: !!t.isReminder, payCard: t.defaultCard || "",
     });
   });
 
@@ -968,7 +1047,7 @@ function PaymentDashboard({ onLogout, userName }) {
   var [selected, setSelected] = useState({});  // { payId: true }
 
   var [form, setForm] = useState({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true});
-  var [recF, setRecF] = useState({name:"",category:"Credit Card",amount:"",dayOfMonth:"1",autoPay:false,varies:true,minPay:"",closeDay:"",startDate:getToday(),endDate:""});
+  var [recF, setRecF] = useState({name:"",category:"Credit Card",amount:"",dayOfMonth:"1",autoPay:false,varies:true,minPay:"",closeDay:"",startDate:getToday(),endDate:"",isReminder:false,defaultCard:""});
   var [empF, setEmpF] = useState({name:"",salary:"",startDate:getToday()});
   var [chkIn, setChkIn] = useState("");
   var [noteIn, setNoteIn] = useState("");
@@ -1297,7 +1376,8 @@ function PaymentDashboard({ onLogout, userName }) {
         }
       }
       var fastInfo = getFastTimes(cy, cm, d);
-      days.push({day:d,ds:ds,due:due,cnt:cnt,hp:hp,heb:hebStr,hebDay:hebDay,hebMonth:hebMonth,hebYear:heb.year,holiday:holiday,isClosed:isClosed,isWknd:isWknd,bankHol:bankHol,parsha:parsha,candle:candle,havdalah:havdalah,fastInfo:fastInfo});
+      var specialShab = isSat ? getSpecialShabbos(cy, cm, d) : [];
+      days.push({day:d,ds:ds,due:due,cnt:cnt,hp:hp,heb:hebStr,hebDay:hebDay,hebMonth:hebMonth,hebYear:heb.year,holiday:holiday,isClosed:isClosed,isWknd:isWknd,bankHol:bankHol,parsha:parsha,candle:candle,havdalah:havdalah,fastInfo:fastInfo,specialShab:specialShab});
     }
     return days;
   }, [cy,cm,allPayments,officeClosed,zmanLoc]);
@@ -1310,7 +1390,8 @@ function PaymentDashboard({ onLogout, userName }) {
 
   /* ══════ ACTIONS — optimistic UI + background SP write ══════ */
   var fieldMap = {PayStatus:'status',CheckNum:'checkNum',PayNote:'note',Excluded:'excluded',UseMin:'useMin',
-    Title:'name',Category:'category',Amount:'amount',DueDate:'dueDate',AutoPay:'autoPay',MinPay:'minPay',CloseDate:'closeDate'};
+    Title:'name',Category:'category',Amount:'amount',DueDate:'dueDate',AutoPay:'autoPay',MinPay:'minPay',CloseDate:'closeDate',
+    IsReminder:'isReminder',PayCard:'payCard'};
 
   function spFieldsToJs(fields) {
     var js = {};
@@ -1370,7 +1451,8 @@ function PaymentDashboard({ onLogout, userName }) {
           dayOfMonth:parseInt(form.dayOfMonth),autoPay:form.autoPay,varies:!form.sameAmount,
           minPay:isCC&&form.minPay?parseFloat(form.minPay):0,
           closeDay:isCC&&form.closeDay?parseInt(form.closeDay):0,
-          startDate:getToday(),endDate:""
+          startDate:getToday(),endDate:"",
+          isReminder:!!form.isReminder,defaultCard:form.payCard||""
         }]);
       });
     } else {
@@ -1381,7 +1463,8 @@ function PaymentDashboard({ onLogout, userName }) {
         minPay:isCC&&form.minPay?parseFloat(form.minPay):0,
         closeDate:isCC&&form.closeDay?form.dueDate.slice(0,8)+pad(parseInt(form.closeDay)):"",
         useMin:false,dueDate:form.dueDate,autoPay:form.autoPay,
-        status:UNPAID,checkNum:"",isPayroll:false,varies:false,excluded:false,note:form.note||""
+        status:UNPAID,checkNum:"",isPayroll:false,varies:false,excluded:false,note:form.note||"",
+        isReminder:!!form.isReminder,payCard:form.payCard||""
       };
       // Optimistic: add to state immediately
       setPayments(function(prev) { var n = Object.assign({}, prev); n[newP.id] = newP; return n; });
@@ -1393,7 +1476,7 @@ function PaymentDashboard({ onLogout, userName }) {
         setSaveStatus("saved");
       }).catch(function(e) { console.error('Add:', e); setSaveStatus("error"); });
     }
-    setForm({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true});
+    setForm({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true,isReminder:false,payCard:""});
     setShowAdd(false);
   }
 
@@ -1407,10 +1490,11 @@ function PaymentDashboard({ onLogout, userName }) {
         minPay:isCC&&recF.minPay?parseFloat(recF.minPay):0,
         closeDay:isCC&&recF.closeDay?parseInt(recF.closeDay):0,
         startDate:recF.startDate||getToday(),
-        endDate:recF.endDate||""
+        endDate:recF.endDate||"",
+        isReminder:!!recF.isReminder,defaultCard:recF.defaultCard||""
       }]);
     });
-    setRecF({name:"",category:"Credit Card",amount:"",dayOfMonth:"1",autoPay:false,varies:true,minPay:"",closeDay:"",startDate:getToday(),endDate:""});
+    setRecF({name:"",category:"Credit Card",amount:"",dayOfMonth:"1",autoPay:false,varies:true,minPay:"",closeDay:"",startDate:getToday(),endDate:"",isReminder:false,defaultCard:""});
     setShowRec(false);
   }
 
@@ -1423,7 +1507,8 @@ function PaymentDashboard({ onLogout, userName }) {
       name:t.name, category:t.category, amount:String(t.amount),
       dayOfMonth:String(t.dayOfMonth), autoPay:t.autoPay, varies:t.varies||false,
       minPay:t.minPay?String(t.minPay):"", closeDay:t.closeDay?String(t.closeDay):"",
-      startDate:t.startDate||"", endDate:t.endDate||""
+      startDate:t.startDate||"", endDate:t.endDate||"",
+      isReminder:!!t.isReminder, defaultCard:t.defaultCard||""
     });
   }
   function saveEditTmpl() {
@@ -1437,7 +1522,8 @@ function PaymentDashboard({ onLogout, userName }) {
         minPay:isCC&&editTmplF.minPay?parseFloat(editTmplF.minPay):0,
         closeDay:isCC&&editTmplF.closeDay?parseInt(editTmplF.closeDay):0,
         startDate:editTmplF.startDate||"", endDate:editTmplF.endDate||"",
-        stmtUpdated: prev[editTmplIdx].stmtUpdated || ""
+        stmtUpdated: prev[editTmplIdx].stmtUpdated || "",
+        isReminder: !!editTmplF.isReminder, defaultCard: editTmplF.defaultCard || ""
       };
       return n;
     });
@@ -1456,6 +1542,7 @@ function PaymentDashboard({ onLogout, userName }) {
     var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
     return tmpls.map(function(t, idx) {
       if (t.category !== "Credit Card" || !t.closeDay) return null;
+      if (t.isReminder) return null; // Reminders don't have CC statements
       var dm = daysIn(todayD.getFullYear(), todayD.getMonth());
       var closeDay = Math.min(t.closeDay, dm);
       var closeDate = curMk + "-" + pad(closeDay);
@@ -1465,6 +1552,79 @@ function PaymentDashboard({ onLogout, userName }) {
       return { idx: idx, name: t.name, closeDate: closeDate };
     }).filter(Boolean);
   }, [tmpls, ccDismissed]);
+
+  // Credit card names from templates (for reminder card picker)
+  var ccCardNames = useMemo(function() {
+    return tmpls.filter(function(t) { return t.category === "Credit Card" && !t.isReminder; }).map(function(t) { return t.name; });
+  }, [tmpls]);
+
+  // Reminder alerts: for reminder templates where invoice/statement date has passed
+  var reminderAlerts = useMemo(function() {
+    var today = getToday();
+    var todayD = parseD(today);
+    var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
+    return tmpls.map(function(t, idx) {
+      if (!t.isReminder) return null;
+      if (!t.closeDay) return null; // closeDay doubles as invoice/statement date for reminders
+      var dm = daysIn(todayD.getFullYear(), todayD.getMonth());
+      var invDay = Math.min(t.closeDay, dm);
+      var invDate = curMk + "-" + pad(invDay);
+      if (today < invDate) return null;
+      if (t.stmtUpdated === curMk) return null;
+      if (ccDismissed["rem_" + t.name]) return null;
+      return { idx: idx, name: t.name, invDate: invDate, category: t.category };
+    }).filter(Boolean);
+  }, [tmpls, ccDismissed]);
+
+  var [remUpdateIdx, setRemUpdateIdx] = useState(null);
+  var [remNewAmt, setRemNewAmt] = useState("");
+
+  function updateReminderStatement(idx) {
+    if (!remNewAmt) return;
+    var todayD = parseD(getToday());
+    var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
+    var tName = tmpls[idx].name;
+    setTmpls(function(prev) {
+      var n = prev.slice();
+      n[idx] = Object.assign({}, n[idx], { amount: parseFloat(remNewAmt), stmtUpdated: curMk });
+      return n;
+    });
+    // Also update this month's payment row
+    var payId = "r-" + curMk + "-" + tName;
+    if (payments[payId]) {
+      spUpdate(payId, { Amount: parseFloat(remNewAmt) });
+    }
+    setCcDismissed(function(prev) { var n = Object.assign({}, prev); n["rem_" + tName] = true; return n; });
+    setRemUpdateIdx(null); setRemNewAmt("");
+  }
+
+  function dismissReminderAlert(idx) {
+    var todayD = parseD(getToday());
+    var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
+    var tName = tmpls[idx].name;
+    setTmpls(function(prev) {
+      var n = prev.slice();
+      n[idx] = Object.assign({}, n[idx], { stmtUpdated: curMk });
+      return n;
+    });
+    setCcDismissed(function(prev) { var n = Object.assign({}, prev); n["rem_" + tName] = true; return n; });
+  }
+
+  // Quick card change on a reminder row
+  function setPayCard(id, card) {
+    spUpdate(id, { PayCard: card });
+    // Also update template default if this is recurring
+    var p = payments[id];
+    if (p && p.id.startsWith("r-")) {
+      var tName = p.name;
+      setTmpls(function(prev) {
+        return prev.map(function(t) {
+          if (t.name === tName && t.isReminder) return Object.assign({}, t, { defaultCard: card });
+          return t;
+        });
+      });
+    }
+  }
 
   function updateCcStatement(idx) {
     if (!ccNewAmt) return;
@@ -1574,7 +1734,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
   function openEdit(p) {
     setEditId(p.id);
-    setForm({name:p.name,category:p.category,amount:String(p.amount),dueDate:p.dueDate,autoPay:p.autoPay,checkNum:p.checkNum||"",note:p.note||"",minPay:p.minPay?String(p.minPay):"",closeDay:p.closeDate?String(parseInt(p.closeDate.slice(-2))):""});
+    setForm({name:p.name,category:p.category,amount:String(p.amount),dueDate:p.dueDate,autoPay:p.autoPay,checkNum:p.checkNum||"",note:p.note||"",minPay:p.minPay?String(p.minPay):"",closeDay:p.closeDate?String(parseInt(p.closeDate.slice(-2))):"",isReminder:!!p.isReminder,payCard:p.payCard||""});
   }
 
   function saveEdit() {
@@ -1585,7 +1745,8 @@ function PaymentDashboard({ onLogout, userName }) {
       PayNote: form.note || "",
       MinPay: isCC && form.minPay ? parseFloat(form.minPay) : 0,
       CloseDate: isCC && form.closeDay ? form.dueDate.slice(0,8)+pad(parseInt(form.closeDay)) : "",
-      MonthKey: form.dueDate.substring(0,7)
+      MonthKey: form.dueDate.substring(0,7),
+      PayCard: form.payCard || ""
     };
     spUpdate(editId, fields);
     setEditId(null);
@@ -1856,30 +2017,53 @@ function PaymentDashboard({ onLogout, userName }) {
     var isPast = effDue(p.dueDate) < td && p.status === UNPAID;
     var isExcl = p.excluded && sec === "action";
     var isCC = p.category === "Credit Card";
+    var isRem = p.isReminder;
     var amt = effAmt(p);
     var stripe = idx % 2 === 0 ? "white" : "#f9fafb";
 
+    // For reminders, figure out what card to show
+    // Find the template's default card
+    var tmplDefaultCard = "";
+    if (isRem && p.id.startsWith("r-")) {
+      var tmpl = tmpls.find(function(t) { return t.name === p.name && t.isReminder; });
+      if (tmpl) tmplDefaultCard = tmpl.defaultCard || "";
+    }
+    var displayCard = p.payCard || tmplDefaultCard;
+    // Check if last payment used a different card than default
+    var lastCardNote = "";
+    if (isRem && p.payCard && tmplDefaultCard && p.payCard !== tmplDefaultCard) {
+      lastCardNote = "Default: " + tmplDefaultCard;
+    }
+
     return (
       <div style={{
-        background: isExcl ? "#f1f5f9" : stripe,
+        background: isRem ? (isExcl ? "#f5f3ff" : (stripe === "white" ? "#faf5ff" : "#f5f0ff")) : (isExcl ? "#f1f5f9" : stripe),
         padding: "14px 16px",
         borderBottom: "1px solid #e5e7eb",
-        borderLeft: isPast && !isExcl ? "3px solid #ef4444" : "3px solid transparent",
+        borderLeft: isRem ? "3px solid #a78bfa" : (isPast && !isExcl ? "3px solid #ef4444" : "3px solid transparent"),
         display: "flex", alignItems: "flex-start", gap: 10,
         opacity: isExcl ? 0.5 : 1
       }}>
         {/* Multi-select checkbox */}
         <input type="checkbox" checked={!!selected[p.id]} onChange={function() { toggleSel(p.id); }} style={{
-          width: 18, height: 18, flexShrink: 0, marginTop: 4, cursor: "pointer", accentColor: "#3b82f6"
+          width: 18, height: 18, flexShrink: 0, marginTop: 4, cursor: "pointer", accentColor: isRem ? "#8b5cf6" : "#3b82f6"
         }} />
         {/* Status button */}
-        {sec === "action" && (
+        {sec === "action" && !isRem && (
           <button onClick={function() { markPaid(p.id); }} style={{
             width: 26, height: 26, borderRadius: 6, flexShrink: 0, marginTop: 2,
             border: "2px solid #93c5fd", background: "#eff6ff",
             cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
             color: "#60A5FA", fontSize: 13, fontWeight: 700
           }}>$</button>
+        )}
+        {sec === "action" && isRem && (
+          <button onClick={function() { markPaid(p.id); }} style={{
+            width: 26, height: 26, borderRadius: 6, flexShrink: 0, marginTop: 2,
+            border: "2px solid #c4b5fd", background: "#f5f3ff",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#8b5cf6", fontSize: 12, fontWeight: 700
+          }}>💳</button>
         )}
         {sec === "pending" && (
           <button onClick={function() { markCleared(p.id); }} style={{
@@ -1898,7 +2082,7 @@ function PaymentDashboard({ onLogout, userName }) {
           }}>✓</div>
         )}
 
-        <div style={{ width: 6, height: 6, borderRadius: "50%", background: cat.dot, flexShrink: 0, marginTop: 7 }} />
+        <div style={{ width: 6, height: 6, borderRadius: "50%", background: isRem ? "#a78bfa" : cat.dot, flexShrink: 0, marginTop: 7 }} />
 
         {/* Info */}
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -1911,10 +2095,12 @@ function PaymentDashboard({ onLogout, userName }) {
 
           <div style={{ display: "flex", gap: 4, marginTop: 2, flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: cat.bg, color: cat.tx }}>{p.category}</span>
-            {(p.id.startsWith("r-") || p.id.startsWith("p-")) && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(99,102,241,.08)", color: "#6366f1" }}>🔁 Recurring</span>}
+            {isRem && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(139,92,246,.1)", color: "#7c3aed" }}>🔔 Reminder</span>}
+            {(p.id.startsWith("r-") || p.id.startsWith("p-")) && !isRem && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(99,102,241,.08)", color: "#6366f1" }}>🔁 Recurring</span>}
             {p.autoPay && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(59,130,246,.1)", color: "#60A5FA" }}>Auto-Pay</span>}
             {p.checkNum && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(16,185,129,.1)", color: "#059669", fontFamily: "'JetBrains Mono',monospace" }}>Chk #{p.checkNum}</span>}
-            {isPast && !isExcl && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
+            {isPast && !isExcl && !isRem && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(239,68,68,.1)", color: "#dc2626" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
+            {isPast && !isExcl && isRem && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(139,92,246,.1)", color: "#7c3aed" }}>{fmtS(p.dueDate)} · {overdueTxt(p.dueDate)}</span>}
             {!isPast && sec === "action" && p.dueDate !== td && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: effDue(p.dueDate) === td && p.dueDate !== td ? "rgba(59,130,246,.1)" : "rgba(148,163,184,.08)", color: effDue(p.dueDate) === td && p.dueDate !== td ? "#2563eb" : "#64748b" }}>{effDue(p.dueDate) === td ? "due " + fmtS(p.dueDate) + " (wknd → Fri)" : "due " + fmtS(p.dueDate)}</span>}
             {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
             {sec === "skipped" && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.08)", color: "#64748b" }}>due {fmtS(p.dueDate)}</span>}
@@ -1923,7 +2109,7 @@ function PaymentDashboard({ onLogout, userName }) {
           </div>
 
           {/* CC info */}
-          {isCC && (
+          {isCC && !isRem && (
             <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 3 }}>
               {p.closeDate && <span style={{ fontSize: 11, color: "#94a3b8" }}>Closes {fmtS(p.closeDate)}</span>}
               {p.minPay > 0 && (
@@ -1941,6 +2127,27 @@ function PaymentDashboard({ onLogout, userName }) {
             </div>
           )}
 
+          {/* Reminder card selector */}
+          {isRem && sec !== "cleared" && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 3 }}>
+              <span style={{ fontSize: 11, color: "#8b5cf6", fontWeight: 600 }}>Pay with:</span>
+              <select value={displayCard} onChange={function(e) { setPayCard(p.id, e.target.value); }} style={{
+                fontSize: 11, padding: "2px 6px", borderRadius: 4, border: "1px solid #c4b5fd", background: "#faf5ff",
+                color: "#5b21b6", fontWeight: 600, cursor: "pointer", outline: "none", maxWidth: 160
+              }}>
+                <option value="">Select card...</option>
+                {ccCardNames.map(function(cn) { return <option key={cn} value={cn}>{cn}</option>; })}
+              </select>
+              {lastCardNote && <span style={{ fontSize: 10, color: "#a78bfa", fontStyle: "italic" }}>{lastCardNote}</span>}
+              {p.closeDate && <span style={{ fontSize: 11, color: "#94a3b8" }}>Invoice {fmtS(p.closeDate)}</span>}
+            </div>
+          )}
+          {isRem && sec === "cleared" && displayCard && (
+            <div style={{ display: "flex", gap: 4, alignItems: "center", marginTop: 3 }}>
+              <span style={{ fontSize: 11, color: "#a78bfa" }}>Paid with: {displayCard}</span>
+            </div>
+          )}
+
           {/* Note preview */}
           {p.note && (
             <div style={{ marginTop: 3, fontSize: 11, color: "#6b7280", fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 350 }}>
@@ -1953,10 +2160,11 @@ function PaymentDashboard({ onLogout, userName }) {
         <div style={{ textAlign: "right", flexShrink: 0 }}>
           <div style={{
             fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace",
-            color: sec === "cleared" || isExcl ? "#94a3b8" : "#111827",
+            color: isRem ? (sec === "cleared" || isExcl ? "#c4b5fd" : "#7c3aed") : (sec === "cleared" || isExcl ? "#94a3b8" : "#111827"),
             textDecoration: sec === "cleared" || isExcl ? "line-through" : "none"
-          }}>{fmt(amt)}</div>
-          {isCC && p.useMin && <div style={{ fontSize: 11, color: "#d97706" }}>min pmt</div>}
+          }}>{fmt(p.amount)}</div>
+          {isRem && <div style={{ fontSize: 10, color: "#a78bfa", fontWeight: 600 }}>reminder</div>}
+          {isCC && !isRem && p.useMin && <div style={{ fontSize: 11, color: "#d97706" }}>min pmt</div>}
         </div>
 
         {/* Actions */}
@@ -2037,7 +2245,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <button onClick={function() { setShowRec(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>⟳ Recurring</button>
           <button onClick={function() { setShowFc(!showFc); }} style={{ padding: "8px 14px", background: showFc ? "rgba(139,92,246,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showFc ? 600 : 400 }}>📊 Forecast</button>
           <button onClick={function() { setShowShare(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>📋 Share Summary</button>
-          <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
+          <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true, isReminder: false, payCard: "" }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
           <button onClick={function() { setSaveStatus("saving"); spLoadAllPay().then(function(m) { setPayments(m); hydrateAttachmentsFromPayments(m); setSaveStatus("saved"); }).catch(function() { setSaveStatus("error"); }); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
           <button onClick={function() { if(confirm("Sign out of OpsPay?")) { var a = msalInstance.getAllAccounts(); if(a.length) { msalInstance.logoutPopup({ account: a[0] }).then(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }).catch(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }); } else { localStorage.clear(); sessionStorage.clear(); location.reload(); } }}} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Sign Out</button>
         </div>
@@ -2065,6 +2273,31 @@ function PaymentDashboard({ onLogout, userName }) {
                 <div style={{ display: "flex", gap: 6 }}>
                   <button onClick={function(){setCcUpdateIdx(a.idx);setCcNewAmt("");setCcNewMin("");}} style={{ background: "#f59e0b", color: "white", border: "none", borderRadius: 6, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Update Statement</button>
                   <button onClick={function(){dismissCcAlert(a.idx);}} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 10px", fontSize: 11, cursor: "pointer", color: "#6b7280" }}>Dismiss</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Reminder Invoice/Statement Alerts */}
+        {reminderAlerts.map(function(a) {
+          return (
+            <div key={"rem-"+a.idx} style={{ background: "#faf5ff", border: "1px solid #d8b4fe", borderRadius: 10, padding: "10px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 20 }}>🔔</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#6b21a8" }}>{a.name} — Invoice/Statement Ready</div>
+                <div style={{ fontSize: 11, color: "#7e22ce" }}>Invoice date passed ({fmtS(a.invDate)}). Enter the due amount.</div>
+              </div>
+              {remUpdateIdx === a.idx ? (
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <input value={remNewAmt} onChange={function(e){setRemNewAmt(e.target.value);}} placeholder="Amount due" type="number" step=".01" style={{ width: 120, padding: "6px 8px", borderRadius: 6, border: "1.5px solid #d8b4fe", fontSize: 12, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} autoFocus />
+                  <button onClick={function(){updateReminderStatement(a.idx);}} style={{ background: "#8b5cf6", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Update</button>
+                  <button onClick={function(){setRemUpdateIdx(null);}} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 8px", fontSize: 11, cursor: "pointer", color: "#6b7280" }}>✕</button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={function(){setRemUpdateIdx(a.idx);setRemNewAmt("");}} style={{ background: "#8b5cf6", color: "white", border: "none", borderRadius: 6, padding: "8px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Enter Amount</button>
+                  <button onClick={function(){dismissReminderAlert(a.idx);}} style={{ background: "white", border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 10px", fontSize: 11, cursor: "pointer", color: "#6b7280" }}>Dismiss</button>
                 </div>
               )}
             </div>
@@ -2164,13 +2397,66 @@ function PaymentDashboard({ onLogout, userName }) {
         )}
         
         {/* Date bar */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
           <button onClick={function() { if (!showCal) { var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); } setShowCal(!showCal); }} style={{ background: showCal ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 7px", cursor: "pointer", display: "flex", alignItems: "center" }}>
             <CalIcon size={16} color={showCal ? "#60A5FA" : "#94A3B8"} />
           </button>
           <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>Today</span>
           <span style={{ fontSize: 12, color: "#64748B" }}>{fmtS(td)}</span>
-          {(function() { var tp = td.split("-"); var th = gregToHebrew(+tp[0], +tp[1]-1, +tp[2]); var hebDays = ["\u05D9\u05D5\u05DD \u05D0\u05F3","\u05D9\u05D5\u05DD \u05D1\u05F3","\u05D9\u05D5\u05DD \u05D2\u05F3","\u05D9\u05D5\u05DD \u05D3\u05F3","\u05D9\u05D5\u05DD \u05D4\u05F3","\u05E2\u05E8\u05D1 \u05E9\u05D1\u05EA","\u05E9\u05D1\u05EA"]; var dow = new Date(+tp[0], +tp[1]-1, +tp[2]).getDay(); return <span style={{ fontSize: 12, color: "#9ca3af", direction: "rtl" }}>{hebDays[dow] + " · " + toHebNum(th.day) + " " + hebrewMonthName(th.month) + " " + toHebYear(th.year)}</span>; })()}
+          {(function() {
+            var tp = td.split("-");
+            var tY = +tp[0], tM = +tp[1]-1, tD = +tp[2];
+            var th = gregToHebrew(tY, tM, tD);
+            var hebDays = ["\u05D9\u05D5\u05DD \u05D0\u05F3","\u05D9\u05D5\u05DD \u05D1\u05F3","\u05D9\u05D5\u05DD \u05D2\u05F3","\u05D9\u05D5\u05DD \u05D3\u05F3","\u05D9\u05D5\u05DD \u05D4\u05F3","\u05E2\u05E8\u05D1 \u05E9\u05D1\u05EA","\u05E9\u05D1\u05EA"];
+            var dow = new Date(tY, tM, tD).getDay();
+            var isFri = dow === 5;
+            var isSat = dow === 6;
+            var parts = [];
+
+            // Hebrew day name + date
+            parts.push(<span key="heb" style={{ fontSize: 12, color: "#9ca3af", direction: "rtl" }}>{hebDays[dow] + " · " + toHebNum(th.day) + " " + hebrewMonthName(th.month) + " " + toHebYear(th.year)}</span>);
+
+            // Candle lighting on Friday
+            if (isFri) {
+              var cl = getCandleLighting(tY, tM, tD, zmanLoc);
+              if (cl) parts.push(<span key="candle" style={{ fontSize: 11, fontWeight: 600, color: "#d97706", background: "#fefce8", padding: "1px 8px", borderRadius: 4 }}>{"\uD83D\uDD6F\uFE0F " + cl}</span>);
+            }
+
+            // Erev Yom Tov candle lighting (not Friday)
+            if (!isFri) {
+              var tmrw = new Date(tY, tM, tD + 1);
+              var tmrwKey = toISO(tmrw);
+              var tmrwHol = jewishHols[tmrwKey];
+              if (tmrwHol && OFFICE_CLOSED_HOLIDAYS.indexOf(tmrwHol) !== -1) {
+                var cl2 = getCandleLighting(tY, tM, tD, zmanLoc);
+                if (cl2) parts.push(<span key="candle2" style={{ fontSize: 11, fontWeight: 600, color: "#d97706", background: "#fefce8", padding: "1px 8px", borderRadius: 4 }}>{"\uD83D\uDD6F\uFE0F " + cl2 + " (ער\"ח " + tmrwHol + ")"}</span>);
+              }
+            }
+
+            // Havdalah on Saturday
+            if (isSat) {
+              var hav = getHavdalahTime(tY, tM, tD, zmanLoc);
+              if (hav) parts.push(<span key="hav" style={{ fontSize: 11, fontWeight: 600, color: "#6d28d9", background: "#f5f3ff", padding: "1px 8px", borderRadius: 4 }}>{"\u2728 " + hav}</span>);
+            }
+
+            // Parsha on Friday (this Shabbos) or Saturday
+            var parsha = "";
+            if (isFri) parsha = getParshaForShabbat(tY, tM, tD + 1);
+            if (isSat) parsha = getParshaForShabbat(tY, tM, tD);
+            if (parsha) parts.push(<span key="parsha" style={{ fontSize: 11, fontWeight: 600, color: "#7c3aed", background: "rgba(139,92,246,.08)", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{"\uD83D\uDCDC " + parsha}</span>);
+
+            // Special Shabbos — on Friday (for this coming Shabbos) or Saturday
+            var specShab = [];
+            if (isFri) specShab = getSpecialShabbos(tY, tM, tD + 1);
+            if (isSat) specShab = getSpecialShabbos(tY, tM, tD);
+            if (specShab.length > 0) {
+              specShab.forEach(function(ss, si) {
+                parts.push(<span key={"spec"+si} style={{ fontSize: 11, fontWeight: 600, color: "#be185d", background: "#fce7f3", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{ss}</span>);
+              });
+            }
+
+            return parts;
+          })()}
           {jewishHols[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#92400e", background: "#fefce8", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{jewishHols[td]}</span>}
           {_bankClosed[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#1e40af", background: "#eff6ff", padding: "1px 8px", borderRadius: 4 }}>{String.fromCodePoint(0x1F3E6)} {_bankClosed[td]}</span>}
           <div style={{ flex: 1 }} />
@@ -2268,6 +2554,7 @@ function PaymentDashboard({ onLogout, userName }) {
                     {c.bankHol && <div style={{ fontSize: 7, color: "#1e40af", fontWeight: 600, lineHeight: 1.1, marginTop: 1 }}>{"\uD83C\uDFE6"} {c.bankHol}</div>}
                     {c.isClosed && !c.isWknd && !c.bankHol && <div style={{ fontSize: 8, color: "#dc2626", fontWeight: 700, lineHeight: 1.2, marginTop: 1 }}>CLOSED</div>}
                     {c.parsha && <div style={{ fontSize: 8, color: "#7c3aed", fontWeight: 600, lineHeight: 1.2, marginTop: 1, direction: "rtl" }}>{c.parsha}</div>}
+                    {c.specialShab && c.specialShab.length > 0 && <div style={{ fontSize: 7, color: "#be185d", fontWeight: 600, lineHeight: 1.1, marginTop: 1, direction: "rtl" }}>{c.specialShab.join(" · ")}</div>}
                     {c.candle && <div style={{ fontSize: 8, color: "#d97706", lineHeight: 1.2, marginTop: 1 }}>{String.fromCodePoint(0x1F56F)}{c.candle}</div>}
                     {c.havdalah && <div style={{ fontSize: 8, color: "#6b21a8", lineHeight: 1.2, marginTop: 1 }}>{String.fromCodePoint(0x2728)}{c.havdalah}</div>}
                     {c.fastInfo && <div style={{ fontSize: 8, color: "#dc2626", lineHeight: 1.2 }}>{String.fromCodePoint(0x23F0)}{c.fastInfo.end}</div>}
@@ -2295,6 +2582,16 @@ function PaymentDashboard({ onLogout, userName }) {
                         var cl = getCandleLighting(sd.getFullYear(), sd.getMonth(), sd.getDate(), zmanLoc);
                         if (p) items.push(React.createElement("span", { key: "p", style: { fontSize: 11, fontWeight: 600, color: "#7c3aed", background: "#f3e8ff", padding: "1px 6px", borderRadius: 4, direction: "rtl" } }, String.fromCodePoint(0x1F4DC) + " " + p));
                         if (cl) items.push(React.createElement("span", { key: "cl", style: { fontSize: 11, color: "#d97706", background: "#fefce8", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x1F56F) + " " + cl));
+                        // Special shabbos for this coming Shabbos
+                        var specFri = getSpecialShabbos(sd.getFullYear(), sd.getMonth(), sd.getDate() + 1);
+                        specFri.forEach(function(ss, si) { items.push(React.createElement("span", { key: "specf"+si, style: { fontSize: 11, fontWeight: 600, color: "#be185d", background: "#fce7f3", padding: "1px 6px", borderRadius: 4, direction: "rtl" } }, ss)); });
+                      }
+                      // Parsha + special shabbos on Saturday
+                      if (sd.getDay() === 6) {
+                        var pSat = getParshaForShabbat(sd.getFullYear(), sd.getMonth(), sd.getDate());
+                        if (pSat) items.push(React.createElement("span", { key: "pSat", style: { fontSize: 11, fontWeight: 600, color: "#7c3aed", background: "#f3e8ff", padding: "1px 6px", borderRadius: 4, direction: "rtl" } }, String.fromCodePoint(0x1F4DC) + " " + pSat));
+                        var specSat = getSpecialShabbos(sd.getFullYear(), sd.getMonth(), sd.getDate());
+                        specSat.forEach(function(ss, si) { items.push(React.createElement("span", { key: "specs"+si, style: { fontSize: 11, fontWeight: 600, color: "#be185d", background: "#fce7f3", padding: "1px 6px", borderRadius: 4, direction: "rtl" } }, ss)); });
                       }
                       // Yom Tov eve candle lighting
                       var tmrw = new Date(sd.getTime() + 86400000);
@@ -2590,6 +2887,16 @@ function PaymentDashboard({ onLogout, userName }) {
             <button onClick={function() { setForm(Object.assign({}, form, { isRecurring: true })); }} style={{ flex: 1, padding: "8px 0", border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer", background: form.isRecurring ? "#3B82F6" : "#F8FAFC", color: form.isRecurring ? "#fff" : "#64748B", borderLeft: "1px solid #E2E8F0" }}>Recurring Monthly</button>
           </div>
 
+          {/* Reminder toggle */}
+          <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: form.isReminder ? "#faf5ff" : "#f8fafc", border: form.isReminder ? "1.5px solid #c4b5fd" : "1.5px solid #e2e8f0", borderRadius: 8, cursor: "pointer", transition: "all 0.15s" }}>
+            <input type="checkbox" checked={form.isReminder} onChange={function(e) { setForm(Object.assign({}, form, { isReminder: e.target.checked })); }} style={{ width: 15, height: 15, accentColor: "#8b5cf6", cursor: "pointer" }} />
+            <span style={{ fontSize: 14 }}>🔔</span>
+            <div>
+              <span style={{ fontSize: 12, fontWeight: form.isReminder ? 600 : 400, color: form.isReminder ? "#6b21a8" : "#64748b" }}>Reminder Only (CC Payment)</span>
+              <div style={{ fontSize: 10, color: "#94a3b8" }}>Won't affect funding calculations</div>
+            </div>
+          </label>
+
           <div><Label text="Name" /><input style={inputS} value={form.name} onChange={function(e) { setForm(Object.assign({}, form, { name: e.target.value })); }} placeholder="e.g. Office Supplies" /></div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <div><Label text="Category" /><select style={Object.assign({}, inputS, { cursor: "pointer" })} value={form.category} onChange={function(e) { setForm(Object.assign({}, form, { category: e.target.value })); }}>{Object.keys(CATS).map(function(c) { return <option key={c}>{c}</option>; })}</select></div>
@@ -2617,6 +2924,29 @@ function PaymentDashboard({ onLogout, userName }) {
 
           <div><Label text="Note" /><textarea style={Object.assign({}, inputS, { minHeight: 45, resize: "vertical" })} value={form.note} onChange={function(e) { setForm(Object.assign({}, form, { note: e.target.value })); }} placeholder="Optional note..." /></div>
           <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer" }}><input type="checkbox" checked={form.autoPay} onChange={function(e) { setForm(Object.assign({}, form, { autoPay: e.target.checked })); }} style={{ accentColor: "#3B82F6", width: 14, height: 14 }} /><span style={{ fontSize: 12, color: "#374151" }}>Auto-Pay</span></label>
+
+          {/* Reminder-specific: card picker + invoice day */}
+          {form.isReminder && (
+            <div style={{ padding: "9px 11px", background: "#faf5ff", borderRadius: 8, border: "1px solid #d8b4fe" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#6b21a8", marginBottom: 6 }}>🔔 Reminder Details</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <Label text="Pay With Card" />
+                  <select style={Object.assign({}, inputS, { cursor: "pointer", borderColor: "#d8b4fe" })} value={form.payCard} onChange={function(e) { setForm(Object.assign({}, form, { payCard: e.target.value })); }}>
+                    <option value="">Select card...</option>
+                    {ccCardNames.map(function(cn) { return <option key={cn} value={cn}>{cn}</option>; })}
+                  </select>
+                </div>
+                {form.isRecurring && (
+                  <div>
+                    <Label text="Invoice/Statement Day" />
+                    <input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace", borderColor: "#d8b4fe" })} type="number" min="1" max="31" value={form.closeDay} onChange={function(e) { setForm(Object.assign({}, form, { closeDay: e.target.value })); }} placeholder="e.g. 5" />
+                  </div>
+                )}
+              </div>
+              <div style={{ fontSize: 10, color: "#a78bfa", marginTop: 4 }}>Invoice day triggers a banner to enter the due amount</div>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={function() { setShowAdd(false); }} style={btnSecondary}>Cancel</button>
             <button onClick={addPay} style={btnPrimary}>{form.isRecurring ? "Add Recurring" : "Add"}</button>
@@ -2631,9 +2961,18 @@ function PaymentDashboard({ onLogout, userName }) {
           <div><Label text="Name" /><input style={inputS} value={form.name} onChange={function(e) { setForm(Object.assign({}, form, { name: e.target.value })); }} /></div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <div><Label text="Category" /><select style={Object.assign({}, inputS, { cursor: "pointer" })} value={form.category} onChange={function(e) { setForm(Object.assign({}, form, { category: e.target.value })); }}>{Object.keys(CATS).map(function(c) { return <option key={c}>{c}</option>; })}</select></div>
-            <div><Label text={form.category === "Credit Card" ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={form.amount} onChange={function(e) { setForm(Object.assign({}, form, { amount: e.target.value })); }} /></div>
+            <div><Label text={form.category === "Credit Card" && !form.isReminder ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={form.amount} onChange={function(e) { setForm(Object.assign({}, form, { amount: e.target.value })); }} /></div>
           </div>
-          <CCFields f={form} setF={setForm} />
+          {!form.isReminder && <CCFields f={form} setF={setForm} />}
+          {form.isReminder && (
+            <div style={{ padding: "9px 11px", background: "#faf5ff", borderRadius: 8, border: "1px solid #d8b4fe" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#6b21a8", marginBottom: 6 }}>🔔 Pay With Card</div>
+              <select style={Object.assign({}, inputS, { cursor: "pointer", borderColor: "#d8b4fe" })} value={form.payCard} onChange={function(e) { setForm(Object.assign({}, form, { payCard: e.target.value })); }}>
+                <option value="">Select card...</option>
+                {ccCardNames.map(function(cn) { return <option key={cn} value={cn}>{cn}</option>; })}
+              </select>
+            </div>
+          )}
           <div><Label text="Due Date" /><input style={inputS} type="date" value={form.dueDate} onChange={function(e) { setForm(Object.assign({}, form, { dueDate: e.target.value })); }} /></div>
           <div><Label text="Check #" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} value={form.checkNum} onChange={function(e) { setForm(Object.assign({}, form, { checkNum: e.target.value })); }} placeholder="Optional" /></div>
           <div><Label text="Note" /><textarea style={Object.assign({}, inputS, { minHeight: 45, resize: "vertical" })} value={form.note} onChange={function(e) { setForm(Object.assign({}, form, { note: e.target.value })); }} /></div>
@@ -2701,17 +3040,47 @@ function PaymentDashboard({ onLogout, userName }) {
         <p style={{ fontSize: 11, color: "#64748B", marginBottom: 12 }}>Auto-created every month.</p>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div><Label text="Name" /><input style={inputS} value={recF.name} onChange={function(e) { setRecF(Object.assign({}, recF, { name: e.target.value })); }} placeholder="e.g. Internet Bill" /></div>
+
+          {/* Reminder toggle */}
+          <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: recF.isReminder ? "#faf5ff" : "#f8fafc", border: recF.isReminder ? "1.5px solid #c4b5fd" : "1.5px solid #e2e8f0", borderRadius: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={recF.isReminder} onChange={function(e) { setRecF(Object.assign({}, recF, { isReminder: e.target.checked })); }} style={{ width: 15, height: 15, accentColor: "#8b5cf6", cursor: "pointer" }} />
+            <span style={{ fontSize: 14 }}>🔔</span>
+            <div>
+              <span style={{ fontSize: 12, fontWeight: recF.isReminder ? 600 : 400, color: recF.isReminder ? "#6b21a8" : "#64748b" }}>Reminder Only (CC Payment)</span>
+              <div style={{ fontSize: 10, color: "#94a3b8" }}>Won't affect funding calculations</div>
+            </div>
+          </label>
+
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <div><Label text="Category" /><select style={Object.assign({}, inputS, { cursor: "pointer" })} value={recF.category} onChange={function(e) { setRecF(Object.assign({}, recF, { category: e.target.value })); }}>{Object.keys(CATS).map(function(c) { return <option key={c}>{c}</option>; })}</select></div>
-            <div><Label text={recF.category === "Credit Card" ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={recF.amount} onChange={function(e) { setRecF(Object.assign({}, recF, { amount: e.target.value })); }} /></div>
+            <div><Label text={recF.category === "Credit Card" && !recF.isReminder ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={recF.amount} onChange={function(e) { setRecF(Object.assign({}, recF, { amount: e.target.value })); }} /></div>
           </div>
-          {recF.category === "Credit Card" && (
+          {recF.category === "Credit Card" && !recF.isReminder && (
             <div style={{ padding: "9px 11px", background: "#FFFBEB", borderRadius: 8, border: "1px solid #FDE68A", background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: "#92400E" }}>💳 Credit Card Details</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 <div><Label text="Min Payment ($)" /><input style={Object.assign({}, inputS, { borderColor: "#FDE68A" })} type="number" step=".01" value={recF.minPay} onChange={function(e) { setRecF(Object.assign({}, recF, { minPay: e.target.value })); }} /></div>
                 <div><Label text="Close Day" /><input style={Object.assign({}, inputS, { borderColor: "#FDE68A" })} type="number" min="1" max="31" value={recF.closeDay} onChange={function(e) { setRecF(Object.assign({}, recF, { closeDay: e.target.value })); }} /></div>
               </div>
+            </div>
+          )}
+          {recF.isReminder && (
+            <div style={{ padding: "9px 11px", background: "#faf5ff", borderRadius: 8, border: "1px solid #d8b4fe" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#6b21a8", marginBottom: 6 }}>🔔 Reminder Details</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div>
+                  <Label text="Default Card" />
+                  <select style={Object.assign({}, inputS, { cursor: "pointer", borderColor: "#d8b4fe" })} value={recF.defaultCard} onChange={function(e) { setRecF(Object.assign({}, recF, { defaultCard: e.target.value })); }}>
+                    <option value="">Select card...</option>
+                    {ccCardNames.map(function(cn) { return <option key={cn} value={cn}>{cn}</option>; })}
+                  </select>
+                </div>
+                <div>
+                  <Label text="Invoice/Statement Day" />
+                  <input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace", borderColor: "#d8b4fe" })} type="number" min="1" max="31" value={recF.closeDay} onChange={function(e) { setRecF(Object.assign({}, recF, { closeDay: e.target.value })); }} placeholder="e.g. 5" />
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: "#a78bfa", marginTop: 4 }}>Invoice day triggers a banner to enter the due amount</div>
             </div>
           )}
           <div><Label text="Due Day (1-31)" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" min="1" max="31" value={recF.dayOfMonth} onChange={function(e) { setRecF(Object.assign({}, recF, { dayOfMonth: e.target.value })); }} /></div>
@@ -2739,6 +3108,10 @@ function PaymentDashboard({ onLogout, userName }) {
                     <div key={t.name} style={{ padding: "10px", background: "#eff6ff", borderRadius: 8, border: "2px solid #3b82f6" }}>
                       <div style={{ fontSize: 10, fontWeight: 700, color: "#1e40af", marginBottom: 6 }}>✏️ Editing: {t.name}</div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+                          <input type="checkbox" checked={ef.isReminder} onChange={function(e){setEditTmplF(Object.assign({},ef,{isReminder:e.target.checked}));}} style={{ accentColor: "#8b5cf6" }} />
+                          <span style={{ color: ef.isReminder ? "#6b21a8" : "#64748b" }}>🔔 Reminder</span>
+                        </label>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
                           <input value={ef.name} onChange={function(e){setEditTmplF(Object.assign({},ef,{name:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} placeholder="Name" />
                           <select value={ef.category} onChange={function(e){setEditTmplF(Object.assign({},ef,{category:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none", cursor: "pointer" }}>{Object.keys(CATS).map(function(c){return <option key={c}>{c}</option>;})}</select>
@@ -2746,10 +3119,18 @@ function PaymentDashboard({ onLogout, userName }) {
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4 }}>
                           <input value={ef.amount} onChange={function(e){setEditTmplF(Object.assign({},ef,{amount:e.target.value}));}} type="number" step=".01" placeholder="Amount" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} />
                           <input value={ef.dayOfMonth} onChange={function(e){setEditTmplF(Object.assign({},ef,{dayOfMonth:e.target.value}));}} type="number" min="1" max="31" placeholder="Day" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
-                          {ef.category==="Credit Card" && <input value={ef.minPay} onChange={function(e){setEditTmplF(Object.assign({},ef,{minPay:e.target.value}));}} type="number" step=".01" placeholder="Min Pay" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #fde68a", fontSize: 11, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} />}
+                          {ef.category==="Credit Card" && !ef.isReminder && <input value={ef.minPay} onChange={function(e){setEditTmplF(Object.assign({},ef,{minPay:e.target.value}));}} type="number" step=".01" placeholder="Min Pay" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #fde68a", fontSize: 11, fontFamily: "'JetBrains Mono',monospace", outline: "none" }} />}
                         </div>
-                        {ef.category==="Credit Card" && (
+                        {ef.category==="Credit Card" && !ef.isReminder && (
                           <input value={ef.closeDay} onChange={function(e){setEditTmplF(Object.assign({},ef,{closeDay:e.target.value}));}} type="number" min="1" max="31" placeholder="Close Day" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #fde68a", fontSize: 11, outline: "none", width: "50%" }} />
+                        )}
+                        {ef.isReminder && (
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                            <select value={ef.defaultCard} onChange={function(e){setEditTmplF(Object.assign({},ef,{defaultCard:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d8b4fe", fontSize: 11, outline: "none", cursor: "pointer" }}>
+                              <option value="">Default card...</option>
+                              {ccCardNames.map(function(cn){return <option key={cn} value={cn}>{cn}</option>;})}</select>
+                            <input value={ef.closeDay} onChange={function(e){setEditTmplF(Object.assign({},ef,{closeDay:e.target.value}));}} type="number" min="1" max="31" placeholder="Invoice day" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d8b4fe", fontSize: 11, outline: "none" }} />
+                          </div>
                         )}
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
                           <input type="date" value={ef.startDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{startDate:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
@@ -2768,11 +3149,13 @@ function PaymentDashboard({ onLogout, userName }) {
                   <div key={t.name} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 8px", background: "#F8FAFC", borderRadius: 5, border: "1px solid #E2E8F0" }}>
                     <div style={{ width: 5, height: 5, borderRadius: "50%", background: (CATS[t.category] || CATS.Other).dot }} />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "#0F172A" }}>{t.name}</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#0F172A" }}>{t.name} {t.isReminder ? "🔔" : ""}</div>
                       <div style={{ fontSize: 11, color: "#94a3b8" }}>
                         Day {t.dayOfMonth} · {fmt(t.amount)}
-                        {isCC && t.minPay ? " · Min " + fmt(t.minPay) : ""}
-                        {isCC && t.closeDay ? " · Closes day " + t.closeDay : ""}
+                        {isCC && t.minPay && !t.isReminder ? " · Min " + fmt(t.minPay) : ""}
+                        {isCC && t.closeDay && !t.isReminder ? " · Closes day " + t.closeDay : ""}
+                        {t.isReminder && t.closeDay ? " · Invoice day " + t.closeDay : ""}
+                        {t.isReminder && t.defaultCard ? " · " + t.defaultCard : ""}
                       </div>
                       {(t.startDate || t.endDate) && <div style={{ fontSize: 10, color: "#93c5fd" }}>
                         {t.startDate ? "From " + fmtS(t.startDate) : ""}
