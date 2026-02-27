@@ -2169,7 +2169,10 @@ function PaymentDashboard({ onLogout, userName }) {
             <CalIcon size={16} color={showCal ? "#60A5FA" : "#94A3B8"} />
           </button>
           <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>Today</span>
-          <span style={{ fontSize: 12, color: "#64748B" }}>{fmtS(td)} · {dayN(td)}</span>
+          <span style={{ fontSize: 12, color: "#64748B" }}>{fmtS(td)}</span>
+          {(function() { var tp = td.split("-"); var th = gregToHebrew(+tp[0], +tp[1]-1, +tp[2]); var hebDays = ["\u05D9\u05D5\u05DD \u05D0\u05F3","\u05D9\u05D5\u05DD \u05D1\u05F3","\u05D9\u05D5\u05DD \u05D2\u05F3","\u05D9\u05D5\u05DD \u05D3\u05F3","\u05D9\u05D5\u05DD \u05D4\u05F3","\u05E2\u05E8\u05D1 \u05E9\u05D1\u05EA","\u05E9\u05D1\u05EA"]; var dow = new Date(+tp[0], +tp[1]-1, +tp[2]).getDay(); return <span style={{ fontSize: 12, color: "#9ca3af", direction: "rtl" }}>{hebDays[dow] + " · " + toHebNum(th.day) + " " + hebrewMonthName(th.month) + " " + toHebYear(th.year)}</span>; })()}
+          {jewishHols[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#92400e", background: "#fefce8", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{jewishHols[td]}</span>}
+          {_bankClosed[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#1e40af", background: "#eff6ff", padding: "1px 8px", borderRadius: 4 }}>{String.fromCodePoint(0x1F3E6)} {_bankClosed[td]}</span>}
           <div style={{ flex: 1 }} />
           {/* Search bar */}
           <div style={{ position: "relative", width: 240 }}>
