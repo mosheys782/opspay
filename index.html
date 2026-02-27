@@ -1288,8 +1288,8 @@ function PaymentDashboard({ onLogout, userName }) {
   }, [allPayments, selDay, td, searchFilter, searchQ]);
 
   var actionTotal = sum(fActionItems,true);
-  var exclTotal = sum(fActionItems.filter(function(p){return p.excluded;}),false);
-  var exclCount = fActionItems.filter(function(p){return p.excluded;}).length;
+  var exclTotal = sum(fActionItems.filter(function(p){return p.excluded && !p.isReminder;}),false);
+  var exclCount = fActionItems.filter(function(p){return p.excluded && !p.isReminder;}).length;
   var pendTotal = sum(fPendItems,false);
   var clrTotal = sum(fClrItems,false);
   var avail = bal - pendTotal;
@@ -2058,7 +2058,7 @@ function PaymentDashboard({ onLogout, userName }) {
           }}>$</button>
         )}
         {sec === "action" && isRem && (
-          <button onClick={function() { markPaid(p.id); }} style={{
+          <button onClick={function() { markCleared(p.id); }} style={{
             width: 26, height: 26, borderRadius: 6, flexShrink: 0, marginTop: 2,
             border: "2px solid #c4b5fd", background: "#f5f3ff",
             cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
@@ -2185,7 +2185,7 @@ function PaymentDashboard({ onLogout, userName }) {
           )}
           <button onClick={function() { openEdit(p); }} title="Edit" style={smBtn("#dbeafe", "#2563eb")}>✏️</button>
           {sec === "pending" && <button onClick={function() { markUnpaid(p.id); }} title="Undo to Unpaid" style={smBtn("#fef3c7", "#d97706")}>↩️</button>}
-          {sec === "cleared" && <button onClick={function() { markPaid(p.id); }} title="Undo to Pending" style={smBtn("#fef3c7", "#d97706")}>↩️</button>}
+          {sec === "cleared" && <button onClick={function() { isRem ? markUnpaid(p.id) : markPaid(p.id); }} title={isRem ? "Undo to Action" : "Undo to Pending"} style={smBtn("#fef3c7", "#d97706")}>↩️</button>}
           {sec !== "cleared" && <button onClick={function() { if (confirm("Delete " + p.name + "?")) delPay(p.id); }} title="Delete" style={smBtn("#fee2e2", "#dc2626")}>🗑️</button>}
         </div>
       </div>
@@ -2327,7 +2327,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <div style={Object.assign({}, cardS, { borderLeft: "4px solid #ef4444" })}>
             <div style={lblS}>Funding Needed</div>
             <div style={Object.assign({}, numS, { color: actionTotal > 0 ? "#dc2626" : "#10B981" })}>{fmt(actionTotal)}</div>
-            <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fActionItems.filter(function(p) { return !p.excluded; }).length} items{exclCount > 0 ? " · " + exclCount + " skipped" : ""}</div>
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fActionItems.filter(function(p) { return !p.excluded && !p.isReminder; }).length} items{exclCount > 0 ? " · " + exclCount + " skipped" : ""}</div>
           </div>
 
           <div style={Object.assign({}, cardS, { borderLeft: isShort ? "4px solid #dc2626" : "4px solid #10b981" })}>
@@ -2675,7 +2675,7 @@ function PaymentDashboard({ onLogout, userName }) {
         {/* Tabs */}
         <div style={{ display: "flex", background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 9, padding: 3, marginBottom: 12, border: "1px solid #e5e7eb" }}>
           {[
-            { k: "action", l: "Action Needed", n: actionItems.filter(function(p) { return !p.excluded; }).length + (selDay && selDay > td ? futureItems.filter(function(p) { return !p.excluded; }).length : 0), c: "#dc2626" },
+            { k: "action", l: "Action Needed", n: actionItems.filter(function(p) { return !p.excluded && !p.isReminder; }).length + (selDay && selDay > td ? futureItems.filter(function(p) { return !p.excluded && !p.isReminder; }).length : 0), c: "#dc2626" },
             { k: "pending", l: "Pending Clear", n: pendItems.length, c: "#F59E0B" },
             { k: "cleared", l: "Cleared", n: clrItems.length, c: "#10B981" },
             { k: "skipped", l: "Skipped", n: skippedItems.length, c: "#94A3B8" }
@@ -3034,69 +3034,20 @@ function PaymentDashboard({ onLogout, userName }) {
         </div>
       )}
 
-      {/* Add Recurring */}
+      {/* Recurring Templates — view/edit/delete only */}
       <Modal open={showRec} onClose={function() { setShowRec(false); }}>
         <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>Recurring Payments</h2>
-        <p style={{ fontSize: 11, color: "#64748B", marginBottom: 12 }}>Auto-created every month.</p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <div><Label text="Name" /><input style={inputS} value={recF.name} onChange={function(e) { setRecF(Object.assign({}, recF, { name: e.target.value })); }} placeholder="e.g. Internet Bill" /></div>
-
-          {/* Reminder toggle */}
-          <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: recF.isReminder ? "#faf5ff" : "#f8fafc", border: recF.isReminder ? "1.5px solid #c4b5fd" : "1.5px solid #e2e8f0", borderRadius: 8, cursor: "pointer" }}>
-            <input type="checkbox" checked={recF.isReminder} onChange={function(e) { setRecF(Object.assign({}, recF, { isReminder: e.target.checked })); }} style={{ width: 15, height: 15, accentColor: "#8b5cf6", cursor: "pointer" }} />
-            <span style={{ fontSize: 14 }}>🔔</span>
-            <div>
-              <span style={{ fontSize: 12, fontWeight: recF.isReminder ? 600 : 400, color: recF.isReminder ? "#6b21a8" : "#64748b" }}>Reminder Only (CC Payment)</span>
-              <div style={{ fontSize: 10, color: "#94a3b8" }}>Won't affect funding calculations</div>
-            </div>
-          </label>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <div><Label text="Category" /><select style={Object.assign({}, inputS, { cursor: "pointer" })} value={recF.category} onChange={function(e) { setRecF(Object.assign({}, recF, { category: e.target.value })); }}>{Object.keys(CATS).map(function(c) { return <option key={c}>{c}</option>; })}</select></div>
-            <div><Label text={recF.category === "Credit Card" && !recF.isReminder ? "Full Statement ($)" : "Amount ($)"} /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" step=".01" value={recF.amount} onChange={function(e) { setRecF(Object.assign({}, recF, { amount: e.target.value })); }} /></div>
+        <p style={{ fontSize: 11, color: "#64748B", marginBottom: 12 }}>Manage your recurring templates. Use <b>+ Payment → Recurring Monthly</b> to add new ones.</p>
+        {tmpls.length === 0 ? (
+          <div style={{ textAlign: "center", padding: 30, color: "#94a3b8", background: "#f8fafc", borderRadius: 10 }}>
+            <div style={{ fontSize: 24, marginBottom: 6 }}>⟳</div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>No recurring templates yet</div>
+            <div style={{ fontSize: 11, marginTop: 4 }}>Click <b>+ Payment</b> and choose <b>Recurring Monthly</b> to create one.</div>
           </div>
-          {recF.category === "Credit Card" && !recF.isReminder && (
-            <div style={{ padding: "9px 11px", background: "#FFFBEB", borderRadius: 8, border: "1px solid #FDE68A", background: "white", borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", overflow: "hidden" }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: "#92400E" }}>💳 Credit Card Details</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div><Label text="Min Payment ($)" /><input style={Object.assign({}, inputS, { borderColor: "#FDE68A" })} type="number" step=".01" value={recF.minPay} onChange={function(e) { setRecF(Object.assign({}, recF, { minPay: e.target.value })); }} /></div>
-                <div><Label text="Close Day" /><input style={Object.assign({}, inputS, { borderColor: "#FDE68A" })} type="number" min="1" max="31" value={recF.closeDay} onChange={function(e) { setRecF(Object.assign({}, recF, { closeDay: e.target.value })); }} /></div>
-              </div>
-            </div>
-          )}
-          {recF.isReminder && (
-            <div style={{ padding: "9px 11px", background: "#faf5ff", borderRadius: 8, border: "1px solid #d8b4fe" }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: "#6b21a8", marginBottom: 6 }}>🔔 Reminder Details</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div>
-                  <Label text="Default Card" />
-                  <select style={Object.assign({}, inputS, { cursor: "pointer", borderColor: "#d8b4fe" })} value={recF.defaultCard} onChange={function(e) { setRecF(Object.assign({}, recF, { defaultCard: e.target.value })); }}>
-                    <option value="">Select card...</option>
-                    {ccCardNames.map(function(cn) { return <option key={cn} value={cn}>{cn}</option>; })}
-                  </select>
-                </div>
-                <div>
-                  <Label text="Invoice/Statement Day" />
-                  <input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace", borderColor: "#d8b4fe" })} type="number" min="1" max="31" value={recF.closeDay} onChange={function(e) { setRecF(Object.assign({}, recF, { closeDay: e.target.value })); }} placeholder="e.g. 5" />
-                </div>
-              </div>
-              <div style={{ fontSize: 10, color: "#a78bfa", marginTop: 4 }}>Invoice day triggers a banner to enter the due amount</div>
-            </div>
-          )}
-          <div><Label text="Due Day (1-31)" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" min="1" max="31" value={recF.dayOfMonth} onChange={function(e) { setRecF(Object.assign({}, recF, { dayOfMonth: e.target.value })); }} /></div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <div><Label text="Start Date" /><input type="date" style={inputS} value={recF.startDate} onChange={function(e) { setRecF(Object.assign({}, recF, { startDate: e.target.value })); }} /></div>
-            <div><Label text="End Date (optional)" /><input type="date" style={inputS} value={recF.endDate} onChange={function(e) { setRecF(Object.assign({}, recF, { endDate: e.target.value })); }} /></div>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={function() { setShowRec(false); }} style={btnSecondary}>Cancel</button>
-            <button onClick={addRec} style={btnPrimary}>Add</button>
-          </div>
-        </div>
-        {tmpls.length > 0 && (
-          <div style={{ marginTop: 14, borderTop: "1px solid #E2E8F0", paddingTop: 10 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6, textTransform: "uppercase" }}>Active Recurring</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 300, overflowY: "auto" }}>
+        ) : (
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6, textTransform: "uppercase" }}>Active Recurring ({tmpls.length})</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 420, overflowY: "auto" }}>
               {tmpls.map(function(t, idx) {
                 var isCC = t.category === "Credit Card";
                 var isEditing = editTmplIdx === idx;
@@ -3132,6 +3083,10 @@ function PaymentDashboard({ onLogout, userName }) {
                             <input value={ef.closeDay} onChange={function(e){setEditTmplF(Object.assign({},ef,{closeDay:e.target.value}));}} type="number" min="1" max="31" placeholder="Invoice day" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d8b4fe", fontSize: 11, outline: "none" }} />
                           </div>
                         )}
+                        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+                          <input type="checkbox" checked={ef.autoPay} onChange={function(e){setEditTmplF(Object.assign({},ef,{autoPay:e.target.checked}));}} style={{ accentColor: "#3b82f6" }} />
+                          <span style={{ color: "#64748b" }}>Auto-Pay</span>
+                        </label>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
                           <input type="date" value={ef.startDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{startDate:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
                           <input type="date" value={ef.endDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{endDate:e.target.value}));}} placeholder="End" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
@@ -3146,16 +3101,17 @@ function PaymentDashboard({ onLogout, userName }) {
                 }
 
                 return (
-                  <div key={t.name} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 8px", background: "#F8FAFC", borderRadius: 5, border: "1px solid #E2E8F0" }}>
-                    <div style={{ width: 5, height: 5, borderRadius: "50%", background: (CATS[t.category] || CATS.Other).dot }} />
+                  <div key={t.name} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 10px", background: t.isReminder ? "#faf5ff" : "#F8FAFC", borderRadius: 6, border: t.isReminder ? "1px solid #e9d5ff" : "1px solid #E2E8F0" }}>
+                    <div style={{ width: 5, height: 5, borderRadius: "50%", background: t.isReminder ? "#a78bfa" : (CATS[t.category] || CATS.Other).dot }} />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "#0F172A" }}>{t.name} {t.isReminder ? "🔔" : ""}</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: "#0F172A" }}>{t.name} {t.isReminder ? "🔔" : ""}</div>
                       <div style={{ fontSize: 11, color: "#94a3b8" }}>
                         Day {t.dayOfMonth} · {fmt(t.amount)}
                         {isCC && t.minPay && !t.isReminder ? " · Min " + fmt(t.minPay) : ""}
                         {isCC && t.closeDay && !t.isReminder ? " · Closes day " + t.closeDay : ""}
                         {t.isReminder && t.closeDay ? " · Invoice day " + t.closeDay : ""}
-                        {t.isReminder && t.defaultCard ? " · " + t.defaultCard : ""}
+                        {t.isReminder && t.defaultCard ? " · 💳 " + t.defaultCard : ""}
+                        {t.autoPay ? " · Auto-Pay" : ""}
                       </div>
                       {(t.startDate || t.endDate) && <div style={{ fontSize: 10, color: "#93c5fd" }}>
                         {t.startDate ? "From " + fmtS(t.startDate) : ""}
@@ -3163,15 +3119,15 @@ function PaymentDashboard({ onLogout, userName }) {
                       </div>}
                     </div>
                     <button onClick={function() { openEditTmpl(idx); }} style={{ background: "#dbeafe", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#2563eb", fontSize: 14 }}>✏️</button>
-                    <button onClick={function() { remTmpl(t.name); }} style={{ background: "#fee2e2", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#dc2626", fontSize: 14 }}>🗑️</button>
+                    <button onClick={function() { if(confirm("Delete recurring template \"" + t.name + "\"?")) remTmpl(t.name); }} style={{ background: "#fee2e2", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#dc2626", fontSize: 14 }}>🗑️</button>
                   </div>
                 );
               })}
             </div>
           </div>
         )}
-        <div style={{ marginTop: 20, borderTop: "1px solid #E2E8F0", paddingTop: 14 }}>
-          <button onClick={function() { setShowRec(false); }} style={{ width: "100%", padding: "10px", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", color: "#475569", fontSize: 13, fontWeight: 600 }}>Close</button>
+        <div style={{ marginTop: 16, borderTop: "1px solid #E2E8F0", paddingTop: 12 }}>
+          <button onClick={function() { setShowRec(false); setEditTmplIdx(null); setEditTmplF(null); }} style={{ width: "100%", padding: "10px", background: "#0f172a", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Done</button>
         </div>
       </Modal>
 
