@@ -853,7 +853,7 @@ function genExpected(year, month, tmpls, emps) {
       id: "r-"+mk+"-"+t.name, name: t.name, category: t.category, amount: t.amount,
       minPay: isCC?(t.minPay||0):0, closeDate: isCC?mk+"-"+pad(Math.min(t.closeDay||1,dm)):"",
       useMin: false, dueDate: dueDate, autoPay: t.autoPay, varies: t.varies||false,
-      status: UNPAID, checkNum: "", isPayroll: false, empName: "", excluded: false, note: "",
+      status: UNPAID, checkNum: "", isPayroll: false, empName: "", excluded: false, note: t.note||"",
       isReminder: !!t.isReminder, payCard: t.defaultCard || "",
     });
   });
@@ -1158,11 +1158,15 @@ function PaymentDashboard({ onLogout, userName }) {
     })();
   }, [tmpls, emps, ready]);
 
-  // Background refresh every 60 seconds
+  // Background refresh every 60 seconds — reload payments AND config
   useEffect(function() {
     if (!ready) return;
     refreshTimer.current = setInterval(async function() {
       try {
+        var cfg = await spLoadConfig();
+        if (cfg.officeClosed) { setOfficeClosed(cfg.officeClosed); updateClosedDays(cfg.officeClosed, new Date().getFullYear()); }
+        if (cfg.tmpls) setTmpls(cfg.tmpls);
+        if (cfg.zmanLoc) setZmanLoc(cfg.zmanLoc);
         var payMap = await spLoadAllPay();
         setPayments(payMap);
         hydrateAttachmentsFromPayments(payMap);
@@ -1245,7 +1249,19 @@ function PaymentDashboard({ onLogout, userName }) {
   }, [searchQ]);
 
   /* ══════ DERIVED DATA ══════ */
-  var td = getToday();
+  var [td, setTd] = useState(getToday());
+  // Keep today's date fresh — check every 30s and on tab focus
+  useEffect(function() {
+    function checkDate() {
+      var now = getToday();
+      if (now !== td) setTd(now);
+    }
+    var iv = setInterval(checkDate, 30000);
+    function onVis() { if (!document.hidden) checkDate(); }
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    return function() { clearInterval(iv); document.removeEventListener("visibilitychange", onVis); window.removeEventListener("focus", onVis); };
+  }, [td]);
   var allPayments = useMemo(function() { return Object.values(payments); }, [payments]);
 
   var actionItems = useMemo(function() {
@@ -1329,6 +1345,8 @@ function PaymentDashboard({ onLogout, userName }) {
   var jewishHols = useMemo(function() { return Object.assign({}, getJewishHolidays(cy), getJewishHolidays(cy+1)); }, [cy]);
 
   var calDays = useMemo(function() {
+    // Ensure _closedDays is up-to-date before computing calendar
+    updateClosedDays(officeClosed, cy >= 2020 ? cy : new Date().getFullYear());
     var days = [], dm = daysIn(cy,cm), first = new Date(cy,cm,1).getDay();
     for(var i=0;i<first;i++) days.push(null);
     for(var d=1;d<=dm;d++) {
@@ -1451,7 +1469,8 @@ function PaymentDashboard({ onLogout, userName }) {
           dayOfMonth:parseInt(form.dayOfMonth),autoPay:form.autoPay,varies:!form.sameAmount,
           minPay:isCC&&form.minPay?parseFloat(form.minPay):0,
           closeDay:isCC&&form.closeDay?parseInt(form.closeDay):0,
-          startDate:getToday(),endDate:"",
+          startDate:form.startDate||getToday(),endDate:form.endDate||"",
+          note:form.note||"",
           isReminder:!!form.isReminder,defaultCard:form.payCard||""
         }]);
       });
@@ -1476,7 +1495,7 @@ function PaymentDashboard({ onLogout, userName }) {
         setSaveStatus("saved");
       }).catch(function(e) { console.error('Add:', e); setSaveStatus("error"); });
     }
-    setForm({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true,isReminder:false,payCard:""});
+    setForm({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true,isReminder:false,payCard:"",startDate:getToday(),endDate:""});
     setShowAdd(false);
   }
 
@@ -1508,25 +1527,58 @@ function PaymentDashboard({ onLogout, userName }) {
       dayOfMonth:String(t.dayOfMonth), autoPay:t.autoPay, varies:t.varies||false,
       minPay:t.minPay?String(t.minPay):"", closeDay:t.closeDay?String(t.closeDay):"",
       startDate:t.startDate||"", endDate:t.endDate||"",
-      isReminder:!!t.isReminder, defaultCard:t.defaultCard||""
+      isReminder:!!t.isReminder, defaultCard:t.defaultCard||"",
+      note:t.note||""
     });
   }
   function saveEditTmpl() {
     if (!editTmplF || editTmplIdx === null) return;
     var isCC = editTmplF.category === "Credit Card";
-    setTmpls(function(prev) {
-      var n = prev.slice();
-      n[editTmplIdx] = {
-        name:editTmplF.name, category:editTmplF.category, amount:parseFloat(editTmplF.amount),
-        dayOfMonth:parseInt(editTmplF.dayOfMonth), autoPay:editTmplF.autoPay, varies:editTmplF.varies,
-        minPay:isCC&&editTmplF.minPay?parseFloat(editTmplF.minPay):0,
-        closeDay:isCC&&editTmplF.closeDay?parseInt(editTmplF.closeDay):0,
-        startDate:editTmplF.startDate||"", endDate:editTmplF.endDate||"",
-        stmtUpdated: prev[editTmplIdx].stmtUpdated || "",
-        isReminder: !!editTmplF.isReminder, defaultCard: editTmplF.defaultCard || ""
-      };
-      return n;
+    var oldTmpl = tmpls[editTmplIdx];
+    var newNote = editTmplF.note || "";
+    var newAmt = parseFloat(editTmplF.amount);
+    var newTmpl = {
+      name:editTmplF.name, category:editTmplF.category, amount:newAmt,
+      dayOfMonth:parseInt(editTmplF.dayOfMonth), autoPay:editTmplF.autoPay, varies:editTmplF.varies,
+      minPay:isCC&&editTmplF.minPay?parseFloat(editTmplF.minPay):0,
+      closeDay:isCC&&editTmplF.closeDay?parseInt(editTmplF.closeDay):0,
+      startDate:editTmplF.startDate||"", endDate:editTmplF.endDate||"",
+      stmtUpdated: oldTmpl.stmtUpdated || "",
+      isReminder: !!editTmplF.isReminder, defaultCard: editTmplF.defaultCard || "",
+      note: newNote
+    };
+    setTmpls(function(prev) { var n = prev.slice(); n[editTmplIdx] = newTmpl; return n; });
+
+    // Propagate template changes to all UNPAID payments from this template
+    // Only update fields that still match the OLD template defaults (user hasn't customized them)
+    var oldNote = oldTmpl.note || "";
+    var oldAmt = oldTmpl.amount;
+    setPayments(function(prev) {
+      var updated = Object.assign({}, prev);
+      var dirty = [];
+      Object.keys(updated).forEach(function(pid) {
+        var p = updated[pid];
+        if (p.status !== UNPAID) return;
+        if (p.name !== oldTmpl.name) return;
+        if (!pid.startsWith("r-")) return; // only recurring-generated payments
+        var changed = false;
+        var patch = {};
+        // Update note if it still matches old template note (user didn't customize)
+        if (p.note === oldNote && newNote !== oldNote) { patch.note = newNote; changed = true; }
+        // Update amount if same-amount mode and amount still matches old template
+        if (!newTmpl.varies && p.amount === oldAmt && newAmt !== oldAmt) { patch.amount = newAmt; changed = true; }
+        // Update autoPay
+        if (p.autoPay !== newTmpl.autoPay) { patch.autoPay = newTmpl.autoPay; changed = true; }
+        if (changed) {
+          updated[pid] = Object.assign({}, p, patch);
+          dirty.push(updated[pid]);
+        }
+      });
+      // Persist changes to SP in background
+      dirty.forEach(function(dp) { if (dp._spId) spUpdatePay(dp._spId, payToFields(dp)).catch(function(e){ console.error("Tmpl propagate:", e); }); });
+      return updated;
     });
+
     setEditTmplIdx(null); setEditTmplF(null);
   }
 
@@ -1734,7 +1786,13 @@ function PaymentDashboard({ onLogout, userName }) {
 
   function openEdit(p) {
     setEditId(p.id);
-    setForm({name:p.name,category:p.category,amount:String(p.amount),dueDate:p.dueDate,autoPay:p.autoPay,checkNum:p.checkNum||"",note:p.note||"",minPay:p.minPay?String(p.minPay):"",closeDay:p.closeDate?String(parseInt(p.closeDate.slice(-2))):"",isReminder:!!p.isReminder,payCard:p.payCard||""});
+    // For note, fall back to template note if payment has no custom note
+    var editNote = p.note || "";
+    if (!editNote && p.id && p.id.startsWith("r-")) {
+      var tmpl = tmpls.find(function(t) { return t.name === p.name; });
+      if (tmpl && tmpl.note) editNote = tmpl.note;
+    }
+    setForm({name:p.name,category:p.category,amount:String(p.amount),dueDate:p.dueDate,autoPay:p.autoPay,checkNum:p.checkNum||"",note:editNote,minPay:p.minPay?String(p.minPay):"",closeDay:p.closeDate?String(parseInt(p.closeDate.slice(-2))):"",isReminder:!!p.isReminder,payCard:p.payCard||""});
   }
 
   function saveEdit() {
@@ -1832,9 +1890,27 @@ function PaymentDashboard({ onLogout, userName }) {
     setSelected({});
   }
 
+  function bulkSkip() {
+    setSkipPickId("__bulk__");
+    setSkipPickDate("");
+  }
+
+  function bulkResumeDate() {
+    setSkipPickId("__bulk_resume__");
+    setSkipPickDate("");
+  }
+
   async function doRefresh() {
     setSaveStatus("saving");
-    try { var m = await spLoadAllPay(); setPayments(m); hydrateAttachmentsFromPayments(m); setSaveStatus("saved"); }
+    try {
+      var cfg = await spLoadConfig();
+      if (cfg.officeClosed) { setOfficeClosed(cfg.officeClosed); updateClosedDays(cfg.officeClosed, new Date().getFullYear()); }
+      if (cfg.tmpls) setTmpls(cfg.tmpls);
+      if (cfg.zmanLoc) setZmanLoc(cfg.zmanLoc);
+      var m = await spLoadAllPay(); setPayments(m); hydrateAttachmentsFromPayments(m);
+      setTd(getToday());
+      setSaveStatus("saved");
+    }
     catch(e) { console.error('Refresh:', e); setSaveStatus("error"); }
   }
 
@@ -2018,6 +2094,13 @@ function PaymentDashboard({ onLogout, userName }) {
     var isExcl = p.excluded && sec === "action";
     var isCC = p.category === "Credit Card";
     var isRem = p.isReminder;
+    // Effective note: payment's own note, or fall back to template note for recurring
+    var tmplNote = "";
+    if (!p.note && p.id && p.id.startsWith("r-")) {
+      var tmpl = tmpls.find(function(t) { return t.name === p.name; });
+      if (tmpl && tmpl.note) tmplNote = tmpl.note;
+    }
+    var effectiveNote = p.note || tmplNote;
     var amt = effAmt(p);
     var stripe = idx % 2 === 0 ? "white" : "#f9fafb";
 
@@ -2149,9 +2232,9 @@ function PaymentDashboard({ onLogout, userName }) {
           )}
 
           {/* Note preview */}
-          {p.note && (
+          {effectiveNote && (
             <div style={{ marginTop: 3, fontSize: 11, color: "#6b7280", fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 350 }}>
-              📝 {p.note}
+              📝 {effectiveNote}{!p.note && tmplNote ? " ⟳" : ""}
             </div>
           )}
         </div>
@@ -2169,7 +2252,7 @@ function PaymentDashboard({ onLogout, userName }) {
 
         {/* Actions */}
         <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
-          <button onClick={function() { setNoteId(p.id); setNoteIn(p.note || ""); }} title="Note" style={smBtn(p.note ? "#f3e8ff" : "#f1f5f9", p.note ? "#7c3aed" : "#64748b")}>📝</button>
+          <button onClick={function() { setNoteId(p.id); setNoteIn(effectiveNote || ""); }} title={effectiveNote ? "Note: " + effectiveNote : "Add note"} style={smBtn(effectiveNote ? "#f3e8ff" : "#f1f5f9", effectiveNote ? "#7c3aed" : "#64748b")}>📝</button>
           {attachments[p.id] && attachments[p.id].length > 0 && <button onClick={function() { openAttachViewer(attachments[p.id][0], attachments[p.id], 0); }} title={attachments[p.id].length + " attachment(s)"} style={smBtn("#dbeafe", "#2563eb")}>{attachments[p.id].length > 1 ? "📎" + attachments[p.id].length : "📎"}</button>}
           {sec === "action" && !p.excluded && (
             <button onClick={function() { setSkipPickId(p.id); setSkipPickDate(""); }} title="Skip" style={smBtn("#f1f5f9", "#64748b")}>⏭️</button>
@@ -2245,8 +2328,8 @@ function PaymentDashboard({ onLogout, userName }) {
           <button onClick={function() { setShowRec(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>⟳ Recurring</button>
           <button onClick={function() { setShowFc(!showFc); }} style={{ padding: "8px 14px", background: showFc ? "rgba(139,92,246,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showFc ? 600 : 400 }}>📊 Forecast</button>
           <button onClick={function() { setShowShare(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>📋 Share Summary</button>
-          <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true, isReminder: false, payCard: "" }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
-          <button onClick={function() { setSaveStatus("saving"); spLoadAllPay().then(function(m) { setPayments(m); hydrateAttachmentsFromPayments(m); setSaveStatus("saved"); }).catch(function() { setSaveStatus("error"); }); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
+          <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true, isReminder: false, payCard: "", startDate: getToday(), endDate: "" }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
+          <button onClick={async function() { setSaveStatus("saving"); try { var cfg = await spLoadConfig(); if (cfg.officeClosed) { setOfficeClosed(cfg.officeClosed); updateClosedDays(cfg.officeClosed, new Date().getFullYear()); } if (cfg.tmpls) setTmpls(cfg.tmpls); if (cfg.zmanLoc) setZmanLoc(cfg.zmanLoc); var m = await spLoadAllPay(); setPayments(m); hydrateAttachmentsFromPayments(m); setTd(getToday()); setSaveStatus("saved"); } catch(e) { console.error("Refresh:", e); setSaveStatus("error"); } }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
           <button onClick={function() { if(confirm("Sign out of OpsPay?")) { var a = msalInstance.getAllAccounts(); if(a.length) { msalInstance.logoutPopup({ account: a[0] }).then(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }).catch(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }); } else { localStorage.clear(); sessionStorage.clear(); location.reload(); } }}} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Sign Out</button>
         </div>
       </header>
@@ -2637,6 +2720,7 @@ function PaymentDashboard({ onLogout, userName }) {
                         var oc = Object.assign({}, officeClosed);
                         if (closed) { delete oc[selDay]; } else { oc[selDay] = "Office Closed"; }
                         setOfficeClosed(oc);
+                        updateClosedDays(oc, cy >= 2020 ? cy : new Date().getFullYear());
                       }} style={{ background: closed ? "#fee2e2" : "#f0fdf4", border: "1px solid " + (closed ? "#fca5a5" : "#bbf7d0"), borderRadius: 4, padding: "2px 8px", cursor: "pointer", color: closed ? "#dc2626" : "#16a34a", fontSize: 10, fontWeight: 600 }}>{closed ? "Reopen Office" : "Mark Closed"}</button>;
                     })()}
                     <button onClick={function() { setSelDay(null); }} style={{ background: "#f1f5f9", border: "none", borderRadius: 4, padding: "2px 6px", cursor: "pointer", color: "#64748b", fontSize: 11 }}>✕</button>
@@ -2663,9 +2747,11 @@ function PaymentDashboard({ onLogout, userName }) {
             <span style={{ color: "#93c5fd", fontSize: 14, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", background: "rgba(255,255,255,0.15)", padding: "3px 10px", borderRadius: 6 }}>{fmt(selIds.reduce(function(s,id){var p=payments[id];return s+(p?effAmt(p):0);},0))}</span>
             <div style={{ flex: 1 }} />
             {tab === "action" && <button onClick={bulkPaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>💰 Mark Paid</button>}
+            {tab === "action" && <button onClick={bulkSkip} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>⏭️ Skip</button>}
             {tab === "pending" && <button onClick={bulkCleared} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✓ Mark Cleared</button>}
             {tab === "pending" && <button onClick={bulkUnpaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Undo to Unpaid</button>}
             {tab === "skipped" && <button onClick={bulkUnskip} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Unskip Selected</button>}
+            {tab === "skipped" && <button onClick={bulkResumeDate} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>⏰ Change Resume Date</button>}
             {tab === "cleared" && <button onClick={bulkUnpaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Undo</button>}
             <button onClick={bulkDelete} style={{ background: "rgba(239,68,68,0.3)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>🗑️ Delete</button>
             <button onClick={selNone} style={{ background: "rgba(255,255,255,0.15)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ Clear</button>
@@ -2823,17 +2909,63 @@ function PaymentDashboard({ onLogout, userName }) {
 
       {/* Skip with date picker */}
       <Modal open={skipPickId !== null} onClose={function() { setSkipPickId(null); }}>
-        <h2 style={{ fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 }}>{skipPickId && payments[skipPickId] && payments[skipPickId].excluded ? "⏰ Change Resume Date" : "⏭️ Skip Payment"}</h2>
-        <p style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>{skipPickId && payments[skipPickId] ? payments[skipPickId].name : ""}</p>
-        <div style={{ marginBottom: 12 }}>
-          <Label text="Auto-resume on (optional)" />
-          <input type="date" value={skipPickDate} onChange={function(e) { setSkipPickDate(e.target.value); }} min={getToday()} style={Object.assign({}, inputS, { marginBottom: 4 })} />
-          <div style={{ fontSize: 11, color: "#94a3b8" }}>Leave blank to skip indefinitely. If a date is set, payment will automatically unskip on that day.</div>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={function() { setSkipPickId(null); }} style={btnSecondary}>Cancel</button>
-          <button onClick={function() { skipWithDate(skipPickId, skipPickDate || null); }} style={Object.assign({}, btnPrimary, { background: "linear-gradient(135deg,#94a3b8,#64748b)" })}>{skipPickId && payments[skipPickId] && payments[skipPickId].excluded ? (skipPickDate ? "Set resume to " + fmtS(skipPickDate) : "Remove resume date") : (skipPickDate ? "Skip until " + fmtS(skipPickDate) : "Skip Indefinitely")}</button>
-        </div>
+        {(function() {
+          var isBulkSkip = skipPickId === "__bulk__";
+          var isBulkResume = skipPickId === "__bulk_resume__";
+          var isBulk = isBulkSkip || isBulkResume;
+          var isSingle = !isBulk && skipPickId;
+          var singleP = isSingle ? payments[skipPickId] : null;
+          var isAlreadySkipped = singleP ? singleP.excluded : isBulkResume;
+
+          var title = isBulkSkip ? "⏭️ Skip " + selCount + " Payments"
+            : isBulkResume ? "⏰ Change Resume Date (" + selCount + " items)"
+            : (isAlreadySkipped ? "⏰ Change Resume Date" : "⏭️ Skip Payment");
+          var subtitle = isBulk
+            ? selIds.map(function(id){var p=payments[id];return p?p.name:"";}).filter(Boolean).join(", ")
+            : (singleP ? singleP.name : "");
+
+          function doAction() {
+            if (isBulk) {
+              selIds.forEach(function(id) {
+                if (isBulkSkip) {
+                  skipWithDate(id, skipPickDate || null);
+                } else {
+                  // Bulk resume — only update resume date, item should already be skipped
+                  if (skipPickDate) {
+                    setSkipUntil(function(prev) { var n = Object.assign({}, prev); n[id] = skipPickDate; return n; });
+                  } else {
+                    setSkipUntil(function(prev) { var n = Object.assign({}, prev); delete n[id]; return n; });
+                  }
+                }
+              });
+              setSkipPickId(null);
+              setSkipPickDate("");
+              if (isBulkSkip) setSelected({});
+            } else {
+              skipWithDate(skipPickId, skipPickDate || null);
+            }
+          }
+
+          var btnLabel = isBulkSkip
+            ? (skipPickDate ? "Skip " + selCount + " until " + fmtS(skipPickDate) : "Skip " + selCount + " Indefinitely")
+            : isBulkResume
+            ? (skipPickDate ? "Set resume to " + fmtS(skipPickDate) : "Remove resume dates")
+            : (isAlreadySkipped ? (skipPickDate ? "Set resume to " + fmtS(skipPickDate) : "Remove resume date") : (skipPickDate ? "Skip until " + fmtS(skipPickDate) : "Skip Indefinitely"));
+
+          return React.createElement("div", null,
+            React.createElement("h2", { style: { fontSize: 15, fontWeight: 700, color: "#0F172A", marginBottom: 4 } }, title),
+            React.createElement("p", { style: { fontSize: 12, color: "#64748b", marginBottom: 12, maxHeight: 40, overflow: "hidden", textOverflow: "ellipsis" } }, subtitle),
+            React.createElement("div", { style: { marginBottom: 12 } },
+              React.createElement(Label, { text: "Auto-resume on (optional)" }),
+              React.createElement("input", { type: "date", value: skipPickDate, onChange: function(e) { setSkipPickDate(e.target.value); }, min: getToday(), style: Object.assign({}, inputS, { marginBottom: 4 }) }),
+              React.createElement("div", { style: { fontSize: 11, color: "#94a3b8" } }, "Leave blank to skip indefinitely. If a date is set, payment will automatically unskip on that day.")
+            ),
+            React.createElement("div", { style: { display: "flex", gap: 8 } },
+              React.createElement("button", { onClick: function() { setSkipPickId(null); }, style: btnSecondary }, "Cancel"),
+              React.createElement("button", { onClick: doAction, style: Object.assign({}, btnPrimary, { background: "linear-gradient(135deg,#94a3b8,#64748b)" }) }, btnLabel)
+            )
+          );
+        })()}
       </Modal>
 
       {/* Share Summary with options */}
@@ -2908,6 +3040,10 @@ function PaymentDashboard({ onLogout, userName }) {
           {form.isRecurring ? (
             <div>
               <div><Label text="Due Day of Month (1-31)" /><input style={Object.assign({}, inputS, { fontFamily: "'JetBrains Mono',monospace" })} type="number" min="1" max="31" value={form.dayOfMonth} onChange={function(e) { setForm(Object.assign({}, form, { dayOfMonth: e.target.value })); }} /></div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
+                <div><Label text="Start Date" /><input type="date" style={inputS} value={form.startDate} onChange={function(e) { setForm(Object.assign({}, form, { startDate: e.target.value })); }} /></div>
+                <div><Label text="End Date (optional)" /><input type="date" style={inputS} value={form.endDate} onChange={function(e) { setForm(Object.assign({}, form, { endDate: e.target.value })); }} /></div>
+              </div>
               <div style={{ marginTop: 10, padding: "9px 11px", background: "#F0FDF4", borderRadius: 8, border: "1px solid #BBF7D0" }}>
                 <label style={{ display: "flex", alignItems: "flex-start", gap: 7, cursor: "pointer" }}>
                   <input type="checkbox" checked={form.sameAmount} onChange={function(e) { setForm(Object.assign({}, form, { sameAmount: e.target.checked })); }} style={{ accentColor: "#10B981", width: 14, height: 14, marginTop: 2 }} />
@@ -3087,6 +3223,7 @@ function PaymentDashboard({ onLogout, userName }) {
                           <input type="checkbox" checked={ef.autoPay} onChange={function(e){setEditTmplF(Object.assign({},ef,{autoPay:e.target.checked}));}} style={{ accentColor: "#3b82f6" }} />
                           <span style={{ color: "#64748b" }}>Auto-Pay</span>
                         </label>
+                        <textarea value={ef.note} onChange={function(e){setEditTmplF(Object.assign({},ef,{note:e.target.value}));}} placeholder="Note (applies to all future payments)" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none", minHeight: 32, resize: "vertical", fontFamily: "inherit" }} />
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
                           <input type="date" value={ef.startDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{startDate:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
                           <input type="date" value={ef.endDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{endDate:e.target.value}));}} placeholder="End" style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
@@ -3117,6 +3254,7 @@ function PaymentDashboard({ onLogout, userName }) {
                         {t.startDate ? "From " + fmtS(t.startDate) : ""}
                         {t.endDate ? " → " + fmtS(t.endDate) : ""}
                       </div>}
+                      {t.note && <div style={{ fontSize: 10, color: "#64748b", fontStyle: "italic", marginTop: 1 }}>📝 {t.note.length > 50 ? t.note.slice(0,50) + "…" : t.note}</div>}
                     </div>
                     <button onClick={function() { openEditTmpl(idx); }} style={{ background: "#dbeafe", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#2563eb", fontSize: 14 }}>✏️</button>
                     <button onClick={function() { if(confirm("Delete recurring template \"" + t.name + "\"?")) remTmpl(t.name); }} style={{ background: "#fee2e2", border: "none", borderRadius: 6, padding: "6px 10px", cursor: "pointer", color: "#dc2626", fontSize: 14 }}>🗑️</button>
