@@ -296,19 +296,28 @@ function effDue(dueDate) {
   return dueDate;
 }
 var _closedDays = {};
+var _bankClosed = {};
 var _zmanLoc = { lat: 40.7128, lng: -74.006, tz: -5 };
 function updateClosedDays(customClosed, year) {
   _closedDays = {};
+  _bankClosed = {};
   // Add Jewish holiday closed days
   var hols = getJewishHolidays(year);
   Object.keys(hols).forEach(function(k) {
     if (OFFICE_CLOSED_HOLIDAYS.indexOf(hols[k]) !== -1) _closedDays[k] = hols[k];
   });
-  // Also check adjacent year for holidays near year boundaries
   var hols2 = getJewishHolidays(year + 1);
   Object.keys(hols2).forEach(function(k) { if (OFFICE_CLOSED_HOLIDAYS.indexOf(hols2[k]) !== -1) _closedDays[k] = hols2[k]; });
   var holsPrev = getJewishHolidays(year - 1);
   Object.keys(holsPrev).forEach(function(k) { if (OFFICE_CLOSED_HOLIDAYS.indexOf(holsPrev[k]) !== -1) _closedDays[k] = holsPrev[k]; });
+  // Add US bank holidays
+  [year - 1, year, year + 1].forEach(function(y) {
+    var bh = getUSBankHolidays(y);
+    Object.keys(bh).forEach(function(k) {
+      _bankClosed[k] = bh[k];
+      _closedDays[k] = bh[k];
+    });
+  });
   // Add custom office closed dates
   if (customClosed) {
     Object.keys(customClosed).forEach(function(k) { _closedDays[k] = customClosed[k] || "Office Closed"; });
@@ -600,6 +609,20 @@ function getCandleLighting(gYear, gMonth, gDay, loc) {
   return h12 + ":" + (mins < 10 ? "0" : "") + mins + " " + ampm;
 }
 
+/* Havdalah / Yom Tov end time (minutes after sunset) */
+function getHavdalahTime(gYear, gMonth, gDay, loc) {
+  var sunset = getSunsetTime(gYear, gMonth, gDay, loc);
+  if (sunset === null) return "";
+  // Standard: 42 min after sunset for 3 small stars
+  var endMin = (sunset * 60) + 42;
+  var hrs = Math.floor(endMin / 60);
+  var mins = Math.round(endMin % 60);
+  if (mins === 60) { hrs++; mins = 0; }
+  var ampm = hrs >= 12 ? "PM" : "AM";
+  var h12 = hrs % 12; if (h12 === 0) h12 = 12;
+  return h12 + ":" + (mins < 10 ? "0" : "") + mins + " " + ampm;
+}
+
 /* Check if a date is a fast day and get fast end time */
 function getFastTimes(gYear, gMonth, gDay) {
   var h = gregToHebrew(gYear, gMonth, gDay);
@@ -627,6 +650,74 @@ function getFastTimes(gYear, gMonth, gDay) {
   var ampm = hrs >= 12 ? "PM" : "AM";
   var h12 = hrs % 12; if (h12 === 0) h12 = 12;
   return { end: h12 + ":" + (mins < 10 ? "0" : "") + mins + " " + ampm, isMajor: isMajor };
+}
+
+/* ── US Bank Holidays (Federal Reserve) ── */
+function getUSBankHolidays(gYear) {
+  var holidays = {};
+  // New Year's Day - Jan 1 (observed prev Fri if Sat, next Mon if Sun)
+  holidays[gYear + "-01-01"] = "New Year's Day";
+  
+  // MLK Day - 3rd Monday of Jan
+  var jan1 = new Date(gYear, 0, 1);
+  var mlk = new Date(gYear, 0, 1 + ((1 - jan1.getDay() + 7) % 7) + 14);
+  holidays[toISO(mlk)] = "MLK Day";
+  
+  // Presidents Day - 3rd Monday of Feb
+  var feb1 = new Date(gYear, 1, 1);
+  var pres = new Date(gYear, 1, 1 + ((1 - feb1.getDay() + 7) % 7) + 14);
+  holidays[toISO(pres)] = "Presidents' Day";
+  
+  // Memorial Day - Last Monday of May
+  var may31 = new Date(gYear, 4, 31);
+  while (may31.getDay() !== 1) may31 = new Date(may31.getTime() - 86400000);
+  holidays[toISO(may31)] = "Memorial Day";
+  
+  // Juneteenth - Jun 19 (observed)
+  var june19 = new Date(gYear, 5, 19);
+  if (june19.getDay() === 6) june19 = new Date(june19.getTime() - 86400000);
+  if (june19.getDay() === 0) june19 = new Date(june19.getTime() + 86400000);
+  holidays[toISO(june19)] = "Juneteenth";
+  
+  // Independence Day - Jul 4 (observed)
+  var jul4 = new Date(gYear, 6, 4);
+  if (jul4.getDay() === 6) jul4 = new Date(jul4.getTime() - 86400000);
+  if (jul4.getDay() === 0) jul4 = new Date(jul4.getTime() + 86400000);
+  holidays[toISO(jul4)] = "Independence Day";
+  
+  // Labor Day - 1st Monday of Sep
+  var sep1 = new Date(gYear, 8, 1);
+  var labor = new Date(gYear, 8, 1 + ((1 - sep1.getDay() + 7) % 7));
+  holidays[toISO(labor)] = "Labor Day";
+  
+  // Columbus Day - 2nd Monday of Oct
+  var oct1 = new Date(gYear, 9, 1);
+  var columbus = new Date(gYear, 9, 1 + ((1 - oct1.getDay() + 7) % 7) + 7);
+  holidays[toISO(columbus)] = "Columbus Day";
+  
+  // Veterans Day - Nov 11 (observed)
+  var nov11 = new Date(gYear, 10, 11);
+  if (nov11.getDay() === 6) nov11 = new Date(nov11.getTime() - 86400000);
+  if (nov11.getDay() === 0) nov11 = new Date(nov11.getTime() + 86400000);
+  holidays[toISO(nov11)] = "Veterans Day";
+  
+  // Thanksgiving - 4th Thursday of Nov
+  var nov1 = new Date(gYear, 10, 1);
+  var thx = new Date(gYear, 10, 1 + ((4 - nov1.getDay() + 7) % 7) + 21);
+  holidays[toISO(thx)] = "Thanksgiving";
+  
+  // Christmas - Dec 25 (observed)
+  var dec25 = new Date(gYear, 11, 25);
+  if (dec25.getDay() === 6) dec25 = new Date(dec25.getTime() - 86400000);
+  if (dec25.getDay() === 0) dec25 = new Date(dec25.getTime() + 86400000);
+  holidays[toISO(dec25)] = "Christmas Day";
+  
+  // Also handle New Year observed if Jan 1 is Sat (observed Dec 31 prev year)
+  var ny = new Date(gYear, 0, 1);
+  if (ny.getDay() === 6) holidays[(gYear-1) + "-12-31"] = "New Year's Day (Observed)";
+  if (ny.getDay() === 0) holidays[gYear + "-01-02"] = "New Year's Day (Observed)";
+  
+  return holidays;
 }
 
 var OFFICE_CLOSED_HOLIDAYS = ["ראש השנה","ראש השנה ב","יום כיפור","סוכות","סוכות ב","שמיני עצרת","שמחת תורה","פסח","פסח ב","פסח ז","פסח ח","שבועות","שבועות ב"];
@@ -889,7 +980,8 @@ function PaymentDashboard({ onLogout, userName }) {
   var [skipUntil, setSkipUntil] = useState({});
   var [officeClosed, setOfficeClosed] = useState({});  // { "2026-03-15": "reason" }
   var [zmanLoc, setZmanLoc] = useState({ name: "New York", lat: 40.7128, lng: -74.006, tz: -5 });  // candle lighting location
-  var [showZmanPicker, setShowZmanPicker] = useState(false);            // { payId: "2026-03-15" }
+  var [showZmanPicker, setShowZmanPicker] = useState(false);
+  var [showMonthPicker, setShowMonthPicker] = useState(false);            // { payId: "2026-03-15" }
   var [skipPickId, setSkipPickId] = useState(null);        // payment id for skip date picker
   var [skipPickDate, setSkipPickDate] = useState("");      // date value in picker
   var [showShare, setShowShare] = useState(false);         // share summary modal
@@ -1171,6 +1263,7 @@ function PaymentDashboard({ onLogout, userName }) {
       var hebMonth = hebrewMonthName(heb.month);
       var holiday = jewishHols[ds] || null;
       var isClosed = !!_closedDays[ds];
+      var bankHol = _bankClosed[ds] || null;
       var isWknd = (new Date(cy,cm,d).getDay() === 0 || new Date(cy,cm,d).getDay() === 6);
       var dayOfWeek = new Date(cy,cm,d).getDay();
       var isFri = dayOfWeek === 5;
@@ -1187,8 +1280,23 @@ function PaymentDashboard({ onLogout, userName }) {
       if (!isFri && jewishHols[tomorrow] && OFFICE_CLOSED_HOLIDAYS.indexOf(jewishHols[tomorrow]) !== -1) {
         candle = getCandleLighting(cy, cm, d, zmanLoc);
       }
+      // Havdalah / Yom Tov end time - on Shabbos and major Yom Tov days
+      var havdalah = "";
+      if (isSat) {
+        havdalah = getHavdalahTime(cy, cm, d, zmanLoc);
+      } else if (holiday && OFFICE_CLOSED_HOLIDAYS.indexOf(holiday) !== -1) {
+        // Check if tomorrow is NOT also Yom Tov/Shabbos (only show end on last day)
+        var tmrwD = new Date(cy, cm, d + 1);
+        var tmrwKey2 = toISO(tmrwD);
+        var tmrwHol = jewishHols[tmrwKey2] || null;
+        var tmrwIsSat = tmrwD.getDay() === 6;
+        var tmrwIsYomTov = tmrwHol && OFFICE_CLOSED_HOLIDAYS.indexOf(tmrwHol) !== -1;
+        if (!tmrwIsSat && !tmrwIsYomTov) {
+          havdalah = getHavdalahTime(cy, cm, d, zmanLoc);
+        }
+      }
       var fastInfo = getFastTimes(cy, cm, d);
-      days.push({day:d,ds:ds,due:due,cnt:cnt,hp:hp,heb:hebStr,hebDay:hebDay,hebMonth:hebMonth,hebYear:heb.year,holiday:holiday,isClosed:isClosed,isWknd:isWknd,parsha:parsha,candle:candle,fastInfo:fastInfo});
+      days.push({day:d,ds:ds,due:due,cnt:cnt,hp:hp,heb:hebStr,hebDay:hebDay,hebMonth:hebMonth,hebYear:heb.year,holiday:holiday,isClosed:isClosed,isWknd:isWknd,bankHol:bankHol,parsha:parsha,candle:candle,havdalah:havdalah,fastInfo:fastInfo});
     }
     return days;
   }, [cy,cm,allPayments,officeClosed,zmanLoc]);
@@ -2002,14 +2110,6 @@ function PaymentDashboard({ onLogout, userName }) {
           );
         })}
 
-        {/* Summary */}
-        {selDay && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "6px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: "#1e40af" }}>📅 Funding needed through: {fmtS(selDay)} ({dayN(selDay)})</span>
-            <div style={{ flex: 1 }} />
-            <button onClick={function() { setSelDay(null); setShowCal(false); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
-          </div>
-        )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 16, marginBottom: 24 }}>
           <div style={cardS}>
             <div style={lblS}>Account Balance</div>
@@ -2093,6 +2193,15 @@ function PaymentDashboard({ onLogout, userName }) {
           </div>
         )}
 
+        {/* Summary */}
+        {selDay && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "6px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#1e40af" }}>📅 Funding needed through: {fmtS(selDay)} ({dayN(selDay)})</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={function() { setSelDay(null); setShowCal(false); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
+          </div>
+        )}
+        
         {/* Date bar */}
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
           <button onClick={function() { if (!showCal) { var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); } setShowCal(!showCal); }} style={{ background: showCal ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 7px", cursor: "pointer", display: "flex", alignItems: "center" }}>
@@ -2126,20 +2235,40 @@ function PaymentDashboard({ onLogout, userName }) {
         {showCal && (
           <div style={{ background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 11, padding: 12, border: "1px solid #e5e7eb", marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <button onClick={function() { navMo(-1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: "6px 0 0 6px", padding: "4px 8px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>‹</button>
-                <button onClick={function() { navMo(1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: "0 6px 6px 0", padding: "4px 8px", color: "#374151", fontSize: 14, cursor: "pointer", fontWeight: 700, marginLeft: -1 }}>›</button>
+              <div style={{ display: "flex", alignItems: "center", gap: 0 }}>
+                <button onClick={function() { navMo(-1); setShowMonthPicker(false); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 16, cursor: "pointer", fontWeight: 700 }}>‹</button>
+                <button onClick={function() { setShowMonthPicker(!showMonthPicker); }} style={{ background: showMonthPicker ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: "4px 14px", cursor: "pointer", marginLeft: 6, marginRight: 6 }}>
+                  <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>{MONTHS[cm]} {cy}</span>
+                  <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 500, marginLeft: 8 }}>{(function() { var h1 = gregToHebrew(cy, cm, 1); var h2 = gregToHebrew(cy, cm, daysIn(cy, cm)); return h1.month === h2.month ? hebrewMonthName(h1.month) + " " + toHebYear(h1.year) : hebrewMonthName(h1.month) + " / " + hebrewMonthName(h2.month) + " " + toHebYear(h2.year); })()}</span>
+                </button>
+                <button onClick={function() { navMo(1); setShowMonthPicker(false); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 16, cursor: "pointer", fontWeight: 700 }}>›</button>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>{MONTHS[cm]} {cy}</span>
-                {(function() { var h1 = gregToHebrew(cy, cm, 1); var h2 = gregToHebrew(cy, cm, daysIn(cy, cm)); var str = h1.month === h2.month ? hebrewMonthName(h1.month) + " " + toHebYear(h1.year) : hebrewMonthName(h1.month) + " / " + hebrewMonthName(h2.month) + " " + toHebYear(h2.year); return <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 500 }}>{str}</span>; })()}
-                <button onClick={function() { var t = new Date(); setCy(t.getFullYear()); setCm(t.getMonth()); setShowCal(false); }} style={{ background: "rgba(59,130,246,.1)", border: "none", borderRadius: 4, padding: "2px 7px", color: "#60A5FA", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>Today</button>
-              </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button onClick={function() { var t = new Date(); setCy(t.getFullYear()); setCm(t.getMonth()); setShowMonthPicker(false); }} style={{ background: "rgba(59,130,246,.1)", border: "none", borderRadius: 4, padding: "3px 8px", color: "#2563eb", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Today</button>
                 <button onClick={function() { setShowZmanPicker(!showZmanPicker); }} title={"Zmanim: " + zmanLoc.name} style={{ background: showZmanPicker ? "#eff6ff" : "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 7px", cursor: "pointer", fontSize: 10, color: "#64748b" }}>{String.fromCodePoint(0x1F4CD)} {zmanLoc.name}</button>
-                <button onClick={function() { setShowCal(false); setSelDay(null); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#64748b", fontSize: 12, fontWeight: 600 }}>✕</button>
+                <button onClick={function() { setShowCal(false); setSelDay(null); setShowMonthPicker(false); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#64748b", fontSize: 12, fontWeight: 600 }}>✕</button>
               </div>
             </div>
+            {showMonthPicker && (
+              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 10 }}>
+                  <button onClick={function() { setCy(cy - 1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 10px", cursor: "pointer", fontSize: 14, fontWeight: 700, color: "#374151" }}>‹</button>
+                  <span style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", minWidth: 50, textAlign: "center" }}>{cy}</span>
+                  <button onClick={function() { setCy(cy + 1); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 10px", cursor: "pointer", fontSize: 14, fontWeight: 700, color: "#374151" }}>›</button>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
+                  {MONTHS.map(function(m, i) {
+                    var isCur = i === cm;
+                    var isNow = i === new Date().getMonth() && cy === new Date().getFullYear();
+                    return React.createElement("button", {
+                      key: i,
+                      onClick: function() { setCm(i); setShowMonthPicker(false); setSelDay(null); },
+                      style: { padding: "8px 4px", fontSize: 12, fontWeight: isCur ? 700 : 500, background: isCur ? "#3b82f6" : isNow ? "#eff6ff" : "white", color: isCur ? "white" : "#374151", border: "1px solid " + (isCur ? "#3b82f6" : isNow ? "#93c5fd" : "#e2e8f0"), borderRadius: 6, cursor: "pointer" }
+                    }, m);
+                  })}
+                </div>
+              </div>
+            )}
             {showZmanPicker && (
               <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: 10, marginBottom: 8, display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
                 <span style={{ fontSize: 10, color: "#64748b", fontWeight: 600, marginRight: 4 }}>{String.fromCodePoint(0x1F56F)} Candle Lighting Location:</span>
@@ -2161,7 +2290,7 @@ function PaymentDashboard({ onLogout, userName }) {
                 if (!c) return <div key={"e" + i} />;
                 var isT = c.ds === td;
                 var isSel = c.ds === selDay;
-                var cellBg = isSel ? "#eff6ff" : c.isClosed ? "#fef2f2" : c.isWknd ? "#f1f5f9" : c.holiday ? "#fefce8" : c.due > 0 ? "white" : "#f8fafc";
+                var cellBg = isSel ? "#eff6ff" : c.bankHol ? "#fef2f2" : c.isClosed ? "#fef2f2" : c.isWknd ? "#f1f5f9" : c.holiday ? "#fefce8" : c.due > 0 ? "white" : "#f8fafc";
                 return (
                   <button key={c.ds} onClick={function() { setSelDay(isSel ? null : c.ds); }} style={{
                     background: cellBg,
@@ -2172,9 +2301,11 @@ function PaymentDashboard({ onLogout, userName }) {
                     <div style={{ fontSize: 13, fontWeight: isT || isSel ? 700 : 500, color: isSel ? "#2563eb" : isT ? "#60A5FA" : c.isClosed ? "#dc2626" : "#334155" }}>{c.day}</div>
                     <div style={{ fontSize: 9, color: "#9ca3af", lineHeight: 1.2, direction: "rtl" }}>{toHebNum(c.hebDay) + " " + c.hebMonth}</div>
                     {c.holiday && <div style={{ fontSize: 8, color: "#92400e", fontWeight: 600, lineHeight: 1.2, marginTop: 1, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", padding: "0 2px", direction: "rtl" }}>{c.holiday}</div>}
-                    {c.isClosed && !c.isWknd && <div style={{ fontSize: 8, color: "#dc2626", fontWeight: 700, lineHeight: 1.2, marginTop: 1 }}>CLOSED</div>}
+                    {c.bankHol && <div style={{ fontSize: 7, color: "#b91c1c", fontWeight: 600, lineHeight: 1.1, marginTop: 1 }}>{"\uD83C\uDFE6"} {c.bankHol}</div>}
+                    {c.isClosed && !c.isWknd && !c.bankHol && <div style={{ fontSize: 8, color: "#dc2626", fontWeight: 700, lineHeight: 1.2, marginTop: 1 }}>CLOSED</div>}
                     {c.parsha && <div style={{ fontSize: 8, color: "#7c3aed", fontWeight: 600, lineHeight: 1.2, marginTop: 1, direction: "rtl" }}>{c.parsha}</div>}
                     {c.candle && <div style={{ fontSize: 8, color: "#d97706", lineHeight: 1.2, marginTop: 1 }}>{String.fromCodePoint(0x1F56F)}{c.candle}</div>}
+                    {c.havdalah && <div style={{ fontSize: 8, color: "#6b21a8", lineHeight: 1.2, marginTop: 1 }}>{String.fromCodePoint(0x2728)}{c.havdalah}</div>}
                     {c.fastInfo && <div style={{ fontSize: 8, color: "#dc2626", lineHeight: 1.2 }}>{String.fromCodePoint(0x23F0)}{c.fastInfo.end}</div>}
                     {c.due > 0 && <div style={{ fontSize: 10, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: c.due > avail ? "#dc2626" : "#64748b", marginTop: 1 }}>{c.due >= 1000 ? "$" + (c.due / 1000).toFixed(1) + "k" : fmt(c.due)}</div>}
                     {c.hp && <div style={{ width: 3, height: 3, borderRadius: "50%", background: "#3B82F6" }} />}
@@ -2208,6 +2339,24 @@ function PaymentDashboard({ onLogout, userName }) {
                         var cl2 = getCandleLighting(sd.getFullYear(), sd.getMonth(), sd.getDate(), zmanLoc);
                         if (cl2) items.push(React.createElement("span", { key: "cl2", style: { fontSize: 11, color: "#d97706", background: "#fefce8", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x1F56F) + " " + cl2));
                       }
+                      // Havdalah on Shabbos
+                      if (sd.getDay() === 6) {
+                        var hav = getHavdalahTime(sd.getFullYear(), sd.getMonth(), sd.getDate(), zmanLoc);
+                        if (hav) items.push(React.createElement("span", { key: "hav", style: { fontSize: 11, color: "#6b21a8", background: "#f3e8ff", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x2728) + " " + hav));
+                      }
+                      // Havdalah on Yom Tov (last day)
+                      if (sd.getDay() !== 6) {
+                        var selHol = jewishHols[selDay];
+                        if (selHol && OFFICE_CLOSED_HOLIDAYS.indexOf(selHol) !== -1) {
+                          var tmrw3 = new Date(sd.getTime() + 86400000);
+                          var tmrwK3 = toISO(tmrw3);
+                          var tmrwH3 = jewishHols[tmrwK3];
+                          if (tmrw3.getDay() !== 6 && !(tmrwH3 && OFFICE_CLOSED_HOLIDAYS.indexOf(tmrwH3) !== -1)) {
+                            var hav2 = getHavdalahTime(sd.getFullYear(), sd.getMonth(), sd.getDate(), zmanLoc);
+                            if (hav2) items.push(React.createElement("span", { key: "hav2", style: { fontSize: 11, color: "#6b21a8", background: "#f3e8ff", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x2728) + " " + hav2));
+                          }
+                        }
+                      }
                       var fi = getFastTimes(sd.getFullYear(), sd.getMonth(), sd.getDate());
                       if (fi) items.push(React.createElement("span", { key: "fi", style: { fontSize: 11, color: "#dc2626", background: "#fee2e2", padding: "1px 6px", borderRadius: 4 } }, String.fromCodePoint(0x23F0) + " Fast ends " + fi.end));
                       if (items.length === 0) return null;
@@ -2218,6 +2367,7 @@ function PaymentDashboard({ onLogout, userName }) {
                     <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a" }}>{fmt(dayItems.reduce(function(s,p){return s+effAmt(p);},0))}</span>
                     <span style={{ fontSize: 11, color: "#94a3b8" }}>{dayItems.length} items</span>
                     <button onClick={function() { toggleSelAll(dayItems); }} style={{ background: "none", border: "none", color: "#93c5fd", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{allSelected(dayItems) ? "Deselect all" : "Select all"}</button>
+                    {_bankClosed[selDay] && <span style={{ fontSize: 11, fontWeight: 600, color: "#b91c1c", background: "#fee2e2", padding: "1px 6px", borderRadius: 4 }}>{String.fromCodePoint(0x1F3E6)} {_bankClosed[selDay]}</span>}
                     {(function() {
                       var wd = new Date(parseInt(selDay.slice(0,4)), parseInt(selDay.slice(5,7))-1, parseInt(selDay.slice(8,10))).getDay();
                       if (wd === 0 || wd === 6) return null;
@@ -2286,6 +2436,17 @@ function PaymentDashboard({ onLogout, userName }) {
         {/* Action tab */}
         {tab === "action" && (
           <div>
+            {(function() {
+              var todayBank = _bankClosed[td];
+              if (todayBank) return <div style={{ background: "linear-gradient(135deg, #991b1b, #dc2626)", borderRadius: 10, padding: "10px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 20 }}>{String.fromCodePoint(0x1F3E6)}</span>
+                <div>
+                  <div style={{ color: "white", fontSize: 13, fontWeight: 700 }}>Bank Closed Today</div>
+                  <div style={{ color: "#fecaca", fontSize: 11 }}>{todayBank}</div>
+                </div>
+              </div>;
+              return null;
+            })()}
             {actionItems.length === 0 && !futureItems.length && <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>✓</div><div style={{ fontSize: 14, fontWeight: 600 }}>All caught up!</div></div>}
             {exclCount > 0 && <div style={{ padding: "6px 10px", background: "#f1f5f9", borderRadius: 8, marginBottom: 10, fontSize: 11, color: "#94A3B8" }}>{exclCount} skipped ({fmt(exclTotal)}) — not in funding total</div>}
             {pastItems.length > 0 && (
