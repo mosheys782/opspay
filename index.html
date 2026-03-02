@@ -1477,7 +1477,7 @@ function PaymentDashboard({ onLogout, userName }) {
           startDate:form.startDate||getToday(),endDate:form.endDate||"",
           note:form.note||"",
           isReminder:!!form.isReminder,defaultCard:form.payCard||"",
-          loginUrl:form.loginUrl||"",loginUser:form.loginUser||"",loginPass:form.loginPass||""
+          loginUrl:form.loginUrl||"",loginUser:form.loginUser||"",loginPass:form.loginPass||"",loginOtp:form.loginOtp||""
         }]);
       });
     } else {
@@ -1535,7 +1535,7 @@ function PaymentDashboard({ onLogout, userName }) {
       startDate:t.startDate||"", endDate:t.endDate||"",
       isReminder:!!t.isReminder, defaultCard:t.defaultCard||"",
       note:t.note||"",
-      loginUrl:t.loginUrl||"", loginUser:t.loginUser||"", loginPass:t.loginPass||""
+      loginUrl:t.loginUrl||"", loginUser:t.loginUser||"", loginPass:t.loginPass||"", loginOtp:t.loginOtp||""
     });
   }
   function saveEditTmpl() {
@@ -1553,7 +1553,7 @@ function PaymentDashboard({ onLogout, userName }) {
       stmtUpdated: oldTmpl.stmtUpdated || "",
       isReminder: !!editTmplF.isReminder, defaultCard: editTmplF.defaultCard || "",
       note: newNote,
-      loginUrl: editTmplF.loginUrl || "", loginUser: editTmplF.loginUser || "", loginPass: editTmplF.loginPass || ""
+      loginUrl: editTmplF.loginUrl || "", loginUser: editTmplF.loginUser || "", loginPass: editTmplF.loginPass || "", loginOtp: editTmplF.loginOtp || ""
     };
     setTmpls(function(prev) { var n = prev.slice(); n[editTmplIdx] = newTmpl; return n; });
 
@@ -2255,7 +2255,8 @@ function PaymentDashboard({ onLogout, userName }) {
             <div style={{ marginTop: 4, padding: "6px 10px", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 6, fontSize: 11 }}>
               {tmplLogin.loginUrl && <div style={{ marginBottom: 3 }}><span style={{ color: "#64748b" }}>URL: </span><a href={tmplLogin.loginUrl} target="_blank" rel="noopener" style={{ color: "#0369a1", textDecoration: "underline", wordBreak: "break-all" }}>{tmplLogin.loginUrl}</a></div>}
               {tmplLogin.loginUser && <div style={{ marginBottom: 2 }}><span style={{ color: "#64748b" }}>User: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{tmplLogin.loginUser}</span></div>}
-              {tmplLogin.loginPass && <div><span style={{ color: "#64748b" }}>Pass: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{tmplLogin.loginPass}</span></div>}
+              {tmplLogin.loginPass && <div style={{ marginBottom: 2 }}><span style={{ color: "#64748b" }}>Pass: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{tmplLogin.loginPass}</span></div>}
+              {tmplLogin.loginOtp && <div><span style={{ color: "#64748b" }}>OTP: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{tmplLogin.loginOtp}</span></div>}
             </div>
           )}
         </div>
@@ -2351,7 +2352,7 @@ function PaymentDashboard({ onLogout, userName }) {
           <button onClick={function() { setShowFc(!showFc); }} style={{ padding: "8px 14px", background: showFc ? "rgba(139,92,246,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showFc ? 600 : 400 }}>📊 Forecast</button>
           <button onClick={function() { setShowShare(true); }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>📋 Share Summary</button>
           <button onClick={function() { setShowCloseDates(!showCloseDates); }} style={{ padding: "8px 14px", background: showCloseDates ? "rgba(245,158,11,0.3)" : "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: showCloseDates ? 600 : 400 }}>📅 Close Dates</button>
-          <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true, isReminder: false, payCard: "", startDate: getToday(), endDate: "", loginUrl: "", loginUser: "", loginPass: "" }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
+          <button onClick={function() { setForm({ name: "", category: "Invoice", amount: "", dueDate: getToday(), autoPay: false, checkNum: "", note: "", minPay: "", closeDay: "", isRecurring: false, dayOfMonth: "1", sameAmount: true, isReminder: false, payCard: "", startDate: getToday(), endDate: "", loginUrl: "", loginUser: "", loginPass: "", loginOtp: "" }); setShowAdd(true); }} style={{ padding: "8px 16px", background: "#3b82f6", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600 }}>+ Payment</button>
           <button onClick={async function() { setSaveStatus("saving"); try { var cfg = await spLoadConfig(); if (cfg.officeClosed) { setOfficeClosed(cfg.officeClosed); updateClosedDays(cfg.officeClosed, new Date().getFullYear()); } if (cfg.tmpls) setTmpls(cfg.tmpls); if (cfg.zmanLoc) setZmanLoc(cfg.zmanLoc); var m = await spLoadAllPay(); setPayments(m); hydrateAttachmentsFromPayments(m); setTd(getToday()); setSaveStatus("saved"); } catch(e) { console.error("Refresh:", e); setSaveStatus("error"); } }} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>🔄 Refresh</button>
           <button onClick={function() { if(confirm("Sign out of OpsPay?")) { var a = msalInstance.getAllAccounts(); if(a.length) { msalInstance.logoutPopup({ account: a[0] }).then(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }).catch(function(){ localStorage.clear(); sessionStorage.clear(); location.reload(); }); } else { localStorage.clear(); sessionStorage.clear(); location.reload(); } }}} style={{ padding: "8px 14px", background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Sign Out</button>
         </div>
@@ -2536,7 +2537,8 @@ function PaymentDashboard({ onLogout, userName }) {
                             <div style={{ padding: "6px 12px 8px", background: "#f0f9ff", borderTop: "1px solid #bae6fd", fontSize: 11 }}>
                               {t.loginUrl && <div style={{ marginBottom: 2 }}><span style={{ color: "#64748b" }}>URL: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", wordBreak: "break-all" }}>{t.loginUrl}</span></div>}
                               {t.loginUser && <div style={{ marginBottom: 2 }}><span style={{ color: "#64748b" }}>User: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{t.loginUser}</span></div>}
-                              {t.loginPass && <div><span style={{ color: "#64748b" }}>Pass: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{t.loginPass}</span></div>}
+                              {t.loginPass && <div style={{ marginBottom: 2 }}><span style={{ color: "#64748b" }}>Pass: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{t.loginPass}</span></div>}
+                              {t.loginOtp && <div><span style={{ color: "#64748b" }}>OTP: </span><span style={{ fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", fontWeight: 600 }}>{t.loginOtp}</span></div>}
                             </div>
                           )}
                         </div>
@@ -3176,6 +3178,7 @@ function PaymentDashboard({ onLogout, userName }) {
                 <input style={Object.assign({}, inputS, { fontSize: 12, borderColor: "#bae6fd" })} value={form.loginUser || ""} onChange={function(e) { setForm(Object.assign({}, form, { loginUser: e.target.value })); }} placeholder="Username" />
                 <input style={Object.assign({}, inputS, { fontSize: 12, borderColor: "#bae6fd" })} value={form.loginPass || ""} onChange={function(e) { setForm(Object.assign({}, form, { loginPass: e.target.value })); }} placeholder="Password" type="password" />
               </div>
+              <input style={Object.assign({}, inputS, { fontSize: 12, borderColor: "#bae6fd", marginTop: 6 })} value={form.loginOtp || ""} onChange={function(e) { setForm(Object.assign({}, form, { loginOtp: e.target.value })); }} placeholder="OTP email or phone (e.g. user@email.com or 555-1234)" />
             </div>
           )}
           <div style={{ display: "flex", gap: 8 }}>
@@ -3327,6 +3330,7 @@ function PaymentDashboard({ onLogout, userName }) {
                             <input value={ef.loginUser} onChange={function(e){setEditTmplF(Object.assign({},ef,{loginUser:e.target.value}));}} placeholder="Username" style={{ padding: "4px 6px", borderRadius: 4, border: "1px solid #bae6fd", fontSize: 10, outline: "none" }} />
                             <input value={ef.loginPass} onChange={function(e){setEditTmplF(Object.assign({},ef,{loginPass:e.target.value}));}} placeholder="Password" type="password" style={{ padding: "4px 6px", borderRadius: 4, border: "1px solid #bae6fd", fontSize: 10, outline: "none" }} />
                           </div>
+                          <input value={ef.loginOtp || ""} onChange={function(e){setEditTmplF(Object.assign({},ef,{loginOtp:e.target.value}));}} placeholder="OTP email or phone" style={{ width: "100%", padding: "4px 6px", borderRadius: 4, border: "1px solid #bae6fd", fontSize: 10, outline: "none", marginTop: 3 }} />
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
                           <input type="date" value={ef.startDate} onChange={function(e){setEditTmplF(Object.assign({},ef,{startDate:e.target.value}));}} style={{ padding: "5px 8px", borderRadius: 5, border: "1px solid #d1d5db", fontSize: 11, outline: "none" }} />
