@@ -1048,6 +1048,7 @@ function PaymentDashboard({ onLogout, userName }) {
   useEffect(function() { updateClosedDays(officeClosed, cy >= 2020 ? cy : new Date().getFullYear()); }, [closedKey]);
   useEffect(function() { _zmanLoc = zmanLoc; }, [zmanLoc]);
   var [tab, setTab] = useState("action");
+  var [hideSkipped, setHideSkipped] = useState(true);
   var [saveStatus, setSaveStatus] = useState("saved");
   var [selected, setSelected] = useState({});  // { payId: true }
 
@@ -1273,8 +1274,8 @@ function PaymentDashboard({ onLogout, userName }) {
     return allPayments.filter(function(p){return p.status===UNPAID && effDue(p.dueDate)<=td;}).filter(searchFilter)
       .sort(function(a,b){return a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:b.amount-a.amount;});
   }, [allPayments, td, searchFilter]);
-  var todayItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)===td;});}, [actionItems,td]);
-  var pastItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)<td;});}, [actionItems,td]);
+  var todayItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)===td && (!hideSkipped || !p.excluded);});}, [actionItems,td,hideSkipped]);
+  var pastItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)<td && (!hideSkipped || !p.excluded);});}, [actionItems,td,hideSkipped]);
   var pendItems = useMemo(function(){
     return allPayments.filter(function(p){return p.status===PAID;}).filter(searchFilter).sort(function(a,b){return a.dueDate<b.dueDate?-1:1;});
   }, [allPayments, searchFilter]);
@@ -1304,9 +1305,9 @@ function PaymentDashboard({ onLogout, userName }) {
     var hasFutureDay = selDay && selDay > td;
     if (!hasSearch && !hasFutureDay) return [];
     var maxDate = hasFutureDay ? selDay : "9999-12-31";
-    return allPayments.filter(function(p) { return p.status === UNPAID && effDue(p.dueDate) > td && effDue(p.dueDate) <= maxDate; }).filter(searchFilter)
+    return allPayments.filter(function(p) { return p.status === UNPAID && effDue(p.dueDate) > td && effDue(p.dueDate) <= maxDate && (!hideSkipped || !p.excluded); }).filter(searchFilter)
       .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount; });
-  }, [allPayments, selDay, td, searchFilter, searchQ]);
+  }, [allPayments, selDay, td, searchFilter, searchQ, hideSkipped]);
 
   var actionTotal = sum(fActionItems,true);
   var exclTotal = sum(fActionItems.filter(function(p){return p.excluded && !p.isReminder;}),false);
@@ -2882,7 +2883,10 @@ function PaymentDashboard({ onLogout, userName }) {
               return null;
             })()}
             {actionItems.length === 0 && !futureItems.length && <div style={{ textAlign: "center", padding: 36, color: "#475569", background: "#f8fafc", borderRadius: 11 }}><div style={{ fontSize: 28, marginBottom: 4 }}>✓</div><div style={{ fontSize: 14, fontWeight: 600 }}>All caught up!</div></div>}
-            {exclCount > 0 && <div style={{ padding: "6px 10px", background: "#f1f5f9", borderRadius: 8, marginBottom: 10, fontSize: 11, color: "#94A3B8" }}>{exclCount} skipped ({fmt(exclTotal)}) — not in funding total</div>}
+            {exclCount > 0 && <div style={{ padding: "6px 10px", background: "#f1f5f9", borderRadius: 8, marginBottom: 10, fontSize: 11, color: "#94A3B8", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span>{exclCount} skipped ({fmt(exclTotal)}) — not in funding total</span>
+              <button onClick={function() { setHideSkipped(!hideSkipped); }} style={{ background: hideSkipped ? "#e2e8f0" : "#dbeafe", border: "none", borderRadius: 5, padding: "3px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer", color: hideSkipped ? "#64748b" : "#2563eb" }}>{hideSkipped ? "👁️ Show" : "🙈 Hide"}</button>
+            </div>}
             {pastItems.length > 0 && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
