@@ -1715,23 +1715,34 @@ function PaymentDashboard({ onLogout, userName }) {
     var todayD = parseD(getToday());
     var curMk = todayD.getFullYear() + "-" + pad(todayD.getMonth() + 1);
     var tName = tmpls[idx].name;
+    var newAmt = parseFloat(ccNewAmt);
+    var newMin = ccNewMin ? parseFloat(ccNewMin) : null;
     setTmpls(function(prev) {
       var n = prev.slice();
       n[idx] = Object.assign({}, n[idx], {
-        amount: parseFloat(ccNewAmt),
-        minPay: ccNewMin ? parseFloat(ccNewMin) : n[idx].minPay,
+        amount: newAmt,
+        minPay: newMin !== null ? newMin : n[idx].minPay,
         stmtUpdated: curMk
       });
       return n;
     });
-    // Also update the current month's payment row if it exists
-    var t = tmpls[idx];
-    var mk = curMk;
-    var payId = "r-" + mk + "-" + t.name;
-    if (payments[payId]) {
-      var fields = { Amount: parseFloat(ccNewAmt) };
-      if (ccNewMin) fields.MinPay = parseFloat(ccNewMin);
-      spUpdate(payId, fields);
+    // Find the UNPAID payment row for this template — it may be in the current month
+    // OR next month if the due date falls after the close date (e.g. closes 8th, due 15th next month).
+    // Search all payments for the first unpaid recurring row matching this template name.
+    var targetId = null;
+    var allIds = Object.keys(payments);
+    // Prefer the soonest unpaid row
+    var best = null;
+    for (var i = 0; i < allIds.length; i++) {
+      var p = payments[allIds[i]];
+      if (p.name === tName && p.status === UNPAID && allIds[i].startsWith('r-')) {
+        if (!best || p.dueDate < best.dueDate) { best = p; targetId = allIds[i]; }
+      }
+    }
+    if (targetId) {
+      var fields = { Amount: newAmt };
+      if (newMin !== null) fields.MinPay = newMin;
+      spUpdate(targetId, fields);
     }
     setCcDismissed(function(prev) { var n = Object.assign({}, prev); n[tName] = true; return n; });
     setCcUpdateIdx(null); setCcNewAmt(""); setCcNewMin("");
