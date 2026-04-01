@@ -1107,6 +1107,29 @@ function PaymentDashboard({ onLogout, userName }) {
       m++; if (m > 11) { m = 0; y++; }
     }
     if (created > 0) console.log('Created', created, 'new payment rows');
+
+    // ── Sync pause: DELETE payroll rows that fall inside a pause window ──
+    // Paused = employee is on PFL/unpaid leave — those pay dates simply don't exist.
+    var deleted = 0;
+    for (var j = 0; j < currentEmps.length; j++) {
+      var emp = currentEmps[j];
+      if (!emp.pauseFrom) continue;
+      var ids = Object.keys(payMap);
+      for (var k = 0; k < ids.length; k++) {
+        var p = payMap[ids[k]];
+        if (!p.isPayroll || p.empName !== emp.name) continue;
+        var inPause = p.dueDate >= emp.pauseFrom && (!emp.pauseTo || p.dueDate <= emp.pauseTo);
+        if (inPause) {
+          if (p._spId) {
+            try { await spDeletePay(p._spId); } catch(e) { console.warn('syncPause delete:', e); }
+          }
+          delete payMap[ids[k]];
+          deleted++;
+        }
+      }
+    }
+    if (deleted > 0) console.log('Deleted', deleted, 'payroll rows inside pause windows');
+
     return payMap;
   }
 
@@ -1826,10 +1849,31 @@ function PaymentDashboard({ onLogout, userName }) {
   }
   function remEmp(n) { setEmps(function(p){return p.filter(function(e){return e.name!==n;});}); }
   function pauseEmp(n, from, to) {
-    setEmps(function(p){return p.map(function(e){return e.name===n?Object.assign({},e,{pauseFrom:from,pauseTo:to}):e;});});
+    setEmps(function(prev) {
+      return prev.map(function(e) { return e.name === n ? Object.assign({}, e, { pauseFrom: from, pauseTo: to }) : e; });
+    });
+    // Delete any already-generated payroll rows that fall inside the pause window
+    setPayments(function(prev) {
+      var updated = Object.assign({}, prev);
+      Object.keys(updated).forEach(function(id) {
+        var p = updated[id];
+        if (!p.isPayroll || p.empName !== n) return;
+        var inPause = p.dueDate >= from && (!to || p.dueDate <= to);
+        if (inPause) {
+          if (p._spId) spDeletePay(p._spId).catch(function(e) { console.error('pauseEmp delete:', e); });
+          delete updated[id];
+        }
+      });
+      return updated;
+    });
   }
   function unpauseEmp(n) {
-    setEmps(function(p){return p.map(function(e){return e.name===n?Object.assign({},e,{pauseFrom:"",pauseTo:""}):e;});});
+    // Clear the pause window on the employee first, then trigger a fullLoad
+    // so genExpected will recreate the payroll rows that were deleted during the pause.
+    setEmps(function(prev) {
+      return prev.map(function(e) { return e.name === n ? Object.assign({}, e, { pauseFrom: '', pauseTo: '' }) : e; });
+    });
+    // fullLoad will fire automatically via the emps-change useEffect and recreate the missing rows
   }
   function openEditEmp(emp) {
     setEditEmpName(emp.name);
