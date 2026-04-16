@@ -1228,26 +1228,28 @@ function PaymentDashboard({ onLogout, userName }) {
   useEffect(function() {
     if (!ready) return;
     var today = getToday();
-    var changed = false;
-    var newSkip = Object.assign({}, skipUntil);
-    var unskipIds = [];
-    Object.keys(newSkip).forEach(function(id) {
-      if (newSkip[id] && newSkip[id] <= today) {
-        unskipIds.push(id);
-        delete newSkip[id];
-        changed = true;
+    Object.keys(skipUntil).forEach(function(id) {
+      var resumeDate = skipUntil[id];
+      if (!resumeDate || resumeDate > today) return;    // not yet time to resume
+      var p = payments[id];
+      if (!p) {
+        // Item no longer exists (deleted?). Safe to drop the orphaned resume date.
+        setSkipUntil(function(prev) { var n = Object.assign({}, prev); delete n[id]; return n; });
+        return;
       }
+      if (!p.excluded) {
+        // Item is already unskipped — our work is done, clear the resume date.
+        setSkipUntil(function(prev) { var n = Object.assign({}, prev); delete n[id]; return n; });
+        return;
+      }
+      // Item is still excluded and resume date has arrived → flip Excluded to false.
+      // DO NOT remove skipUntil[id] here — wait for SharePoint + local state to round-trip and
+      // reflect p.excluded=false on a subsequent render, then the branch above will clean it up.
+      // This prevents the "resume date disappears but item is still skipped" bug when the
+      // SharePoint update fails or hasn't landed yet.
+      spUpdate(id, { Excluded: false });
     });
-    if (changed) {
-      setSkipUntil(newSkip);
-      unskipIds.forEach(function(id) {
-        var p = payments[id];
-        if (p && p.excluded) {
-          spUpdate(id, { Excluded: false });
-        }
-      });
-    }
-  }, [ready, payments]);
+  }, [ready, payments, skipUntil]);
 
   function skipWithDate(id, untilDate) {
     var p = payments[id];
@@ -2039,18 +2041,39 @@ function PaymentDashboard({ onLogout, userName }) {
   function navMo(dir) { var m=cm+dir,y=cy; if(m>11){m=0;y++;} if(m<0){m=11;y--;} setCm(m);setCy(y);setSelDay(null); }
 
   // Multi-select helpers
-  function toggleSel(id) { setSelected(function(prev) { var n = Object.assign({}, prev); if (n[id]) delete n[id]; else n[id] = true; return n; }); }
+  function toggleSel(id) {
+    preserveScroll(function() {
+      setSelected(function(prev) { var n = Object.assign({}, prev); if (n[id]) delete n[id]; else n[id] = true; return n; });
+    });
+  }
+  // Preserve scroll across React re-renders triggered by selection changes. Row is defined inside
+  // this component, so every parent re-render unmounts/remounts all rows — which can cause the
+  // browser to reset scroll when a large DOM subtree is replaced. Double-RAF restores scroll
+  // after the DOM has committed AND the browser has painted (more reliable than a single RAF).
+  function preserveScroll(fn) {
+    var y = window.scrollY || window.pageYOffset || 0;
+    fn();
+    requestAnimationFrame(function() { requestAnimationFrame(function() { window.scrollTo(0, y); }); });
+  }
   var selIds = Object.keys(selected);
   var selCount = selIds.length;
 
   function selAll(items) {
-    var s = {};
-    items.forEach(function(p) { s[p.id] = true; });
-    setSelected(s);
+    preserveScroll(function() {
+      var s = {};
+      items.forEach(function(p) { s[p.id] = true; });
+      setSelected(s);
+    });
   }
-  function selNone() { setSelected({}); }
+  function selNone() { preserveScroll(function() { setSelected({}); }); }
   function allSelected(items) { return items.length > 0 && items.every(function(p) { return !!selected[p.id]; }); }
-  function toggleSelAll(items) { if (allSelected(items)) { var n = Object.assign({}, selected); items.forEach(function(p) { delete n[p.id]; }); setSelected(n); } else { selAll(items); } }
+  function toggleSelAll(items) {
+    preserveScroll(function() {
+      if (allSelected(items)) { var n = Object.assign({}, selected); items.forEach(function(p) { delete n[p.id]; }); setSelected(n); } else {
+        var s = {}; items.forEach(function(p) { s[p.id] = true; }); setSelected(s);
+      }
+    });
+  }
 
   function bulkPaid() {
     if (!confirm("Mark " + selCount + " items as Paid?")) return;
@@ -3711,7 +3734,7 @@ function PaymentDashboard({ onLogout, userName }) {
       </Modal>
 
       <footer style={{ textAlign: "center", padding: 24, color: "#6b7280", fontSize: 13, display: "flex", justifyContent: "center", alignItems: "center", gap: 12 }}>
-        <span>🔒 Data stored in SharePoint · OpsPay v2.6</span>
+        <span>🔒 Data stored in SharePoint · OpsPay v2.8</span>
         <span style={{
           fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
           background: saveStatus === "saving" ? "#fef3c7" : saveStatus === "error" ? "#fee2e2" : "#d1fae5",
