@@ -935,9 +935,11 @@ function Modal({open,onClose,children}) {
 }
 function Label({text}) { return <label style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:4,display:"block",textTransform:"uppercase",letterSpacing:".05em"}}>{text}</label>; }
 
-function CalIcon() {
+function CalIcon({size, color}) {
+  var s = size || 20;
+  var c = color || "currentColor";
   return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
       <line x1="16" y1="2" x2="16" y2="6" />
       <line x1="8" y1="2" x2="8" y2="6" />
@@ -1051,6 +1053,7 @@ function PaymentDashboard({ onLogout, userName }) {
   var [hideSkipped, setHideSkipped] = useState(true);
   var [saveStatus, setSaveStatus] = useState("saved");
   var [selected, setSelected] = useState({});  // { payId: true }
+  var [exclSel, setExclSel] = useState(false); // when true, top totals are computed as if selected items were excluded
 
   var [form, setForm] = useState({name:"",category:"Invoice",amount:"",dueDate:getToday(),autoPay:false,checkNum:"",note:"",minPay:"",closeDay:"",isRecurring:false,dayOfMonth:"1",sameAmount:true});
   var [recF, setRecF] = useState({name:"",category:"Credit Card",amount:"",dayOfMonth:"1",autoPay:false,varies:true,minPay:"",closeDay:"",startDate:getToday(),endDate:"",isReminder:false,defaultCard:""});
@@ -1059,6 +1062,7 @@ function PaymentDashboard({ onLogout, userName }) {
   var [noteIn, setNoteIn] = useState("");
   var [fcFrom, setFcFrom] = useState(getToday());
   var [fcTo, setFcTo] = useState(function(){var d=new Date();d.setDate(d.getDate()+30);return toISO(d);});
+  var [fcOpenDays, setFcOpenDays] = useState({}); // { "2026-04-18": true } — which forecast day rows are expanded
   var [editEmpName, setEditEmpName] = useState(null);   // name of employee being edited
   var [editEmpF, setEditEmpF] = useState(null);          // edit form data for employee
   var [searchQ, setSearchQ] = useState("");               // global search query
@@ -1297,8 +1301,25 @@ function PaymentDashboard({ onLogout, userName }) {
     return allPayments.filter(function(p){return p.status===UNPAID && effDue(p.dueDate)<=td;}).filter(searchFilter)
       .sort(function(a,b){return a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:b.amount-a.amount;});
   }, [allPayments, td, searchFilter]);
-  var todayItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)===td && (!hideSkipped || !p.excluded);});}, [actionItems,td,hideSkipped]);
-  var pastItems = useMemo(function(){return actionItems.filter(function(p){return effDue(p.dueDate)<td && (!hideSkipped || !p.excluded);});}, [actionItems,td,hideSkipped]);
+  // todayItems/pastItems: when a future date is selected on the calendar, also surface currently-skipped
+  // items whose resume date falls on/before selDay (revived so they display as active). This keeps the
+  // rendered lists consistent with the top totals (which already include these via fActionItems).
+  var todayItems = useMemo(function(){
+    var base = actionItems.filter(function(p){return effDue(p.dueDate)===td && (!hideSkipped || !p.excluded);});
+    if (!selDay || selDay <= td) return base;
+    var extra = actionItems
+      .filter(function(p){ return effDue(p.dueDate)===td && p.excluded && resumesBy(p, selDay) && !base.some(function(b){return b.id===p.id;}); })
+      .map(reviveForRange);
+    return base.concat(extra);
+  }, [actionItems,td,hideSkipped,selDay,skipUntil]);
+  var pastItems = useMemo(function(){
+    var base = actionItems.filter(function(p){return effDue(p.dueDate)<td && (!hideSkipped || !p.excluded);});
+    if (!selDay || selDay <= td) return base;
+    var extra = actionItems
+      .filter(function(p){ return effDue(p.dueDate)<td && p.excluded && resumesBy(p, selDay) && !base.some(function(b){return b.id===p.id;}); })
+      .map(reviveForRange);
+    return base.concat(extra).sort(function(a,b){return a.dueDate<b.dueDate?-1:a.dueDate>b.dueDate?1:b.amount-a.amount;});
+  }, [actionItems,td,hideSkipped,selDay,skipUntil]);
   var pendItems = useMemo(function(){
     return allPayments.filter(function(p){return p.status===PAID;}).filter(searchFilter).sort(function(a,b){return a.dueDate<b.dueDate?-1:1;});
   }, [allPayments, searchFilter]);
@@ -1313,24 +1334,64 @@ function PaymentDashboard({ onLogout, userName }) {
 
   var sum = function(arr,filterExcl){return arr.filter(function(p){return filterExcl?!p.excluded:true;}).reduce(function(s,p){return s+effAmt(p);},0);};
 
-  // Date-filtered totals: when a day is selected, show all unpaid+pending from today through that date
+  // Helper: a skipped item will auto-resume by `dateStr` if it has a skipUntil <= dateStr.
+  // When it resumes, the row becomes active and is due on its original dueDate (which by then is past).
+  // So for totals that span "today through a future selected date", we should count these items.
+  function resumesBy(p, dateStr) {
+    if (!p || !p.excluded) return false;
+    var until = skipUntil[p.id];
+    if (!until) return false;            // no resume date set → stays skipped
+    return until <= dateStr;              // will resume on/before the selected date
+  }
+  // Return a shallow-cloned payment with excluded:false so sum()/gap math treats it as active.
+  // Return a shallow-cloned payment with excluded:false so sum()/gap math treats it as active.
+  // We stash the original state on the clone so the row can still display a "resumes {date}" badge —
+  // without the badge, a user would have no way to tell the item is actually currently skipped.
+  function reviveForRange(p) { return Object.assign({}, p, { excluded: false, _wasSkipped: true, _resumeDate: skipUntil[p.id] || null }); }
+
+  // Date-filtered totals: when a day is selected, show all unpaid+pending from today through that date.
+  // Also include items currently excluded whose skipUntil falls on/before the selected date, since
+  // those will auto-resume in time to be due within the window.
   var fActionItems = selDay
-    ? allPayments.filter(function(p){return p.status===UNPAID && effDue(p.dueDate)<=selDay;})
+    ? (function() {
+        var base = allPayments.filter(function(p){return p.status===UNPAID && effDue(p.dueDate)<=selDay;});
+        // Add revived skipped items whose dueDate also falls in range
+        var extras = allPayments
+          .filter(function(p){ return p.status===UNPAID && p.excluded && resumesBy(p, selDay) && effDue(p.dueDate) <= selDay; })
+          .filter(function(p){ return base.indexOf(p) === -1; })  // de-dupe (shouldn't overlap, base excludes already excluded? it doesn't — it includes them)
+          .map(reviveForRange);
+        // Note: base already contains these items WITH excluded=true; replace them with revived copies
+        var revIds = {};
+        extras.forEach(function(p){ revIds[p.id] = p; });
+        var merged = base.map(function(p){ return revIds[p.id] ? revIds[p.id] : p; });
+        // Include any revived item that wasn't in base (shouldn't happen given the filter, but safe)
+        extras.forEach(function(p){ if (!merged.some(function(m){ return m.id === p.id; })) merged.push(p); });
+        return merged;
+      })()
     : actionItems;
   var fPendItems = selDay
     ? allPayments.filter(function(p){return p.status===PAID && p.dueDate<=selDay;})
     : pendItems;
   var fClrItems = selDay ? clrItems.filter(function(p){return p.dueDate<=selDay;}) : clrItems;
 
-  // Future items: show unpaid items after today — when a future date is selected OR when searching
+  // Future items: show unpaid items after today — when a future date is selected OR when searching.
+  // Also surface skipped items that will resume before the selected date, so the user sees what's
+  // actually going to hit their balance within the window.
   var futureItems = useMemo(function() {
     var hasSearch = !!searchQ;
     var hasFutureDay = selDay && selDay > td;
     if (!hasSearch && !hasFutureDay) return [];
     var maxDate = hasFutureDay ? selDay : "9999-12-31";
-    return allPayments.filter(function(p) { return p.status === UNPAID && effDue(p.dueDate) > td && effDue(p.dueDate) <= maxDate && (!hideSkipped || !p.excluded); }).filter(searchFilter)
-      .sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount; });
-  }, [allPayments, selDay, td, searchFilter, searchQ, hideSkipped]);
+    var normal = allPayments.filter(function(p) { return p.status === UNPAID && !p.excluded && effDue(p.dueDate) > td && effDue(p.dueDate) <= maxDate; });
+    var resuming = hasFutureDay
+      ? allPayments
+          .filter(function(p){ return p.status === UNPAID && p.excluded && resumesBy(p, selDay) && effDue(p.dueDate) > td && effDue(p.dueDate) <= maxDate; })
+          .map(reviveForRange)
+      : [];
+    var combined = normal.concat(resuming).filter(searchFilter);
+    if (hideSkipped) combined = combined.filter(function(p){ return !p.excluded; });
+    return combined.sort(function(a,b) { return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.amount - a.amount; });
+  }, [allPayments, selDay, td, searchFilter, searchQ, hideSkipped, skipUntil]);
 
   var actionTotal = sum(fActionItems,true);
   var exclTotal = sum(fActionItems.filter(function(p){return p.excluded && !p.isReminder;}),false);
@@ -1341,14 +1402,36 @@ function PaymentDashboard({ onLogout, userName }) {
   var gap = actionTotal - avail;
   var isShort = gap > 0;
 
+  // Feature #4: "what-if" totals treating selected items as excluded.
+  // When exclSel is on AND there are selected items, compute alternate action totals and pending totals
+  // that omit the selected rows. Used to drive the top stat cards so the user can see the impact of
+  // skipping a set of items without actually changing any data.
+  var selActionSubtotal = useMemo(function() {
+    if (!exclSel) return 0;
+    return fActionItems.reduce(function(s, p) {
+      if (!selected[p.id]) return s;
+      if (p.excluded) return s;               // already excluded — wouldn't have been counted anyway
+      return s + effAmt(p);
+    }, 0);
+  }, [exclSel, fActionItems, selected]);
+  var selPendSubtotal = useMemo(function() {
+    if (!exclSel) return 0;
+    return fPendItems.reduce(function(s, p) { return selected[p.id] ? s + effAmt(p) : s; }, 0);
+  }, [exclSel, fPendItems, selected]);
+  var actionTotalEff = actionTotal - selActionSubtotal;
+  var pendTotalEff = pendTotal - selPendSubtotal;
+  var availEff = bal - pendTotalEff;
+  var gapEff = actionTotalEff - availEff;
+  var isShortEff = gapEff > 0;
+
   /* ══════ FORECAST (in-memory generation for date range) ══════ */
   var fcData = useMemo(function() {
     if (!showFc) return null;
     var fD = parseD(fcFrom), tD = parseD(fcTo);
     if (fD > tD) return { err: true };
-    // Use existing payments + generate missing future ones in-memory
+    // Normal in-range items: dueDate falls inside the window
     var inRange = allPayments.filter(function(p) { return p.dueDate >= fcFrom && p.dueDate <= fcTo; });
-    // Also generate expected for months not yet in SP
+    // Also generate expected for months not yet in SP (future rows not persisted yet)
     var y = fD.getFullYear(), m = fD.getMonth();
     while (y < tD.getFullYear() || (y === tD.getFullYear() && m <= tD.getMonth())) {
       var exp = genExpected(y, m, tmpls, emps);
@@ -1356,6 +1439,21 @@ function PaymentDashboard({ onLogout, userName }) {
       m++; if (m > 11) { m = 0; y++; }
     }
     var unpaid = inRange.filter(function(p){return p.status===UNPAID && !p.excluded;});
+    // Include ANY excluded items whose skipUntil (resume date) falls inside the forecast window —
+    // even if their original dueDate is earlier than fcFrom, because once they resume the amount
+    // hits the account on the resume date. Bucket them under the resume date, not original dueDate.
+    var resumingInRange = [];
+    Object.keys(skipUntil).forEach(function(id) {
+      var until = skipUntil[id];
+      if (!until) return;
+      if (until < fcFrom || until > fcTo) return;
+      var p = payments[id];
+      if (!p || p.status !== UNPAID || !p.excluded) return;
+      // Shallow-clone with excluded cleared and dueDate retargeted to the resume date.
+      // Keep the original dueDate in a side field in case anything downstream needs it.
+      resumingInRange.push(Object.assign({}, p, { excluded: false, dueDate: until, _origDueDate: p.dueDate, _resumedFrom: p.dueDate }));
+    });
+    unpaid = unpaid.concat(resumingInRange);
     var pend = inRange.filter(function(p){return p.status===PAID;});
     var tDue = unpaid.reduce(function(s,p){return s+effAmt(p);},0);
     var tPend = pend.reduce(function(s,p){return s+effAmt(p);},0);
@@ -1368,7 +1466,7 @@ function PaymentDashboard({ onLogout, userName }) {
     var byCat = {};
     unpaid.concat(pend).forEach(function(p){byCat[p.category]=(byCat[p.category]||0)+effAmt(p);});
     return {total:total,gap:total-bal,dates:Object.keys(byDate).sort(),byDate:byDate,byCat:byCat,count:unpaid.length+pend.length};
-  }, [showFc,fcFrom,fcTo,allPayments,tmpls,emps,bal,payments]);
+  }, [showFc,fcFrom,fcTo,allPayments,tmpls,emps,bal,payments,skipUntil]);
 
   /* ══════ CALENDAR ══════ */
   var jewishHols = useMemo(function() { return Object.assign({}, getJewishHolidays(cy), getJewishHolidays(cy+1)); }, [cy]);
@@ -1619,7 +1717,9 @@ function PaymentDashboard({ onLogout, userName }) {
   var [ccNewMin, setCcNewMin] = useState("");
   var [ccDismissed, setCcDismissed] = useState({});  // { tmplName: true }
 
-  // CC statement alert: find credit cards where close day has passed this month and statement not yet updated
+  // CC statement alert: find credit cards where close day has passed this month and statement not yet updated.
+  // Banner is delayed by 5 days after the close date, since statements are typically not available immediately.
+  // The displayed close date remains the actual close date.
   var ccAlerts = useMemo(function() {
     var today = getToday();
     var todayD = parseD(today);
@@ -1630,7 +1730,11 @@ function PaymentDashboard({ onLogout, userName }) {
       var dm = daysIn(todayD.getFullYear(), todayD.getMonth());
       var closeDay = Math.min(t.closeDay, dm);
       var closeDate = curMk + "-" + pad(closeDay);
-      if (today < closeDate) return null; // close day hasn't passed yet
+      // Compute banner-visible date = closeDate + 5 days
+      var cd = parseD(closeDate);
+      cd.setDate(cd.getDate() + 5);
+      var visibleDate = cd.getFullYear() + "-" + pad(cd.getMonth() + 1) + "-" + pad(cd.getDate());
+      if (today < visibleDate) return null; // within 5-day grace window
       if (t.stmtUpdated === curMk) return null; // already updated this month
       if (ccDismissed[t.name]) return null; // dismissed this session
       return { idx: idx, name: t.name, closeDate: closeDate };
@@ -1642,7 +1746,8 @@ function PaymentDashboard({ onLogout, userName }) {
     return tmpls.filter(function(t) { return t.category === "Credit Card" && !t.isReminder; }).map(function(t) { return t.name; });
   }, [tmpls]);
 
-  // Reminder alerts: for reminder templates where invoice/statement date has passed
+  // Reminder alerts: for reminder templates where invoice/statement date has passed.
+  // Banner is delayed by 5 days after the invoice/statement date for the same reason as CC alerts.
   var reminderAlerts = useMemo(function() {
     var today = getToday();
     var todayD = parseD(today);
@@ -1653,7 +1758,11 @@ function PaymentDashboard({ onLogout, userName }) {
       var dm = daysIn(todayD.getFullYear(), todayD.getMonth());
       var invDay = Math.min(t.closeDay, dm);
       var invDate = curMk + "-" + pad(invDay);
-      if (today < invDate) return null;
+      // Compute banner-visible date = invDate + 5 days
+      var id_ = parseD(invDate);
+      id_.setDate(id_.getDate() + 5);
+      var visibleDate = id_.getFullYear() + "-" + pad(id_.getMonth() + 1) + "-" + pad(id_.getDate());
+      if (today < visibleDate) return null;
       if (t.stmtUpdated === curMk) return null;
       if (ccDismissed["rem_" + t.name]) return null;
       return { idx: idx, name: t.name, invDate: invDate, category: t.category };
@@ -1726,17 +1835,33 @@ function PaymentDashboard({ onLogout, userName }) {
       });
       return n;
     });
-    // Find the UNPAID payment row for this template — it may be in the current month
-    // OR next month if the due date falls after the close date (e.g. closes 8th, due 15th next month).
-    // Search all payments for the first unpaid recurring row matching this template name.
+    // Find the UNPAID payment row that corresponds to the NEWLY-CLOSED statement cycle.
+    // The new statement just closed on this template's close day of this month (closeDate).
+    // The payment row that represents that statement is the first unpaid row with dueDate > closeDate.
+    // This avoids overwriting an earlier unpaid row that still represents a PRIOR statement cycle
+    // (e.g. card closes 22nd, due 16th next month: on Mar 22 the Mar-16 row is last month's bill,
+    // not the one just closed — the Apr-16 row is).
+    var tmplCloseDay = tmpls[idx].closeDay;
+    var dmCur = daysIn(todayD.getFullYear(), todayD.getMonth());
+    var closeDateStr = curMk + "-" + pad(Math.min(tmplCloseDay || 1, dmCur));
     var targetId = null;
     var allIds = Object.keys(payments);
-    // Prefer the soonest unpaid row
+    // Prefer earliest unpaid row whose due date is AFTER the close date (the new cycle)
     var best = null;
     for (var i = 0; i < allIds.length; i++) {
       var p = payments[allIds[i]];
-      if (p.name === tName && p.status === UNPAID && allIds[i].startsWith('r-')) {
+      if (p.name === tName && p.status === UNPAID && allIds[i].startsWith('r-') && p.dueDate > closeDateStr) {
         if (!best || p.dueDate < best.dueDate) { best = p; targetId = allIds[i]; }
+      }
+    }
+    // Fallback: if nothing matched (e.g. odd config where due day >= close day in same month),
+    // use earliest unpaid row for this template so the update still lands somewhere sensible.
+    if (!targetId) {
+      for (var i2 = 0; i2 < allIds.length; i2++) {
+        var p2 = payments[allIds[i2]];
+        if (p2.name === tName && p2.status === UNPAID && allIds[i2].startsWith('r-')) {
+          if (!best || p2.dueDate < best.dueDate) { best = p2; targetId = allIds[i2]; }
+        }
       }
     }
     if (targetId) {
@@ -2257,7 +2382,9 @@ function PaymentDashboard({ onLogout, userName }) {
             {sec === "pending" && <span style={{ fontSize: 11, color: "#94a3b8" }}>due {fmtS(p.dueDate)}</span>}
             {sec === "skipped" && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.08)", color: "#64748b" }}>due {fmtS(p.dueDate)}</span>}
             {p.excluded && sec === "action" && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped</span>}
-            {p.excluded && skipUntil[p.id] && (sec === "action" || sec === "skipped") && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(245,158,11,.08)", color: "#d97706" }}>{"⏰"} Resumes {fmtS(skipUntil[p.id])}</span>}
+            {p._wasSkipped && sec === "action" && <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 4, background: "rgba(148,163,184,.1)", color: "#94A3B8" }}>Skipped</span>}
+            {p.excluded && skipUntil[p.id] && (sec === "action" || sec === "skipped") && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(245,158,11,.15)", color: "#b45309" }}>{"⏰"} resumes {fmtS(skipUntil[p.id])}</span>}
+            {p._wasSkipped && p._resumeDate && sec === "action" && <span style={{ fontSize: 12, fontWeight: 500, padding: "3px 10px", borderRadius: 4, background: "rgba(245,158,11,.15)", color: "#b45309" }}>{"⏰"} resumes {fmtS(p._resumeDate)}</span>}
           </div>
 
           {/* CC info */}
@@ -2483,20 +2610,21 @@ function PaymentDashboard({ onLogout, userName }) {
 
           <div style={Object.assign({}, cardS, { borderLeft: "4px solid #f59e0b" })}>
             <div style={lblS}>Available (After Pending)</div>
-            <div style={Object.assign({}, numS, { color: avail >= 0 ? "#F59E0B" : "#EF4444" })}>{fmt(avail)}</div>
-            {pendTotal > 0 && <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fmt(pendTotal)} clearing</div>}
+            <div style={Object.assign({}, numS, { color: availEff >= 0 ? "#F59E0B" : "#EF4444" })}>{fmt(availEff)}</div>
+            {pendTotalEff > 0 && <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fmt(pendTotalEff)} clearing</div>}
+            {exclSel && selCount > 0 && <div style={{ fontSize: 10, color: "#f59e0b", marginTop: 2, fontWeight: 600 }}>excl. {selCount} selected</div>}
           </div>
 
           <div style={Object.assign({}, cardS, { borderLeft: "4px solid #ef4444" })}>
             <div style={lblS}>Funding Needed</div>
-            <div style={Object.assign({}, numS, { color: actionTotal > 0 ? "#dc2626" : "#10B981" })}>{fmt(actionTotal)}</div>
-            <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fActionItems.filter(function(p) { return !p.excluded && !p.isReminder; }).length} items{exclCount > 0 ? " · " + exclCount + " skipped" : ""}</div>
+            <div style={Object.assign({}, numS, { color: actionTotalEff > 0 ? "#dc2626" : "#10B981" })}>{fmt(actionTotalEff)}</div>
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fActionItems.filter(function(p) { return !p.excluded && !p.isReminder && !(exclSel && selected[p.id]); }).length} items{exclCount > 0 ? " · " + exclCount + " skipped" : ""}{exclSel && selCount > 0 ? " · " + selCount + " hidden" : ""}</div>
           </div>
 
-          <div style={Object.assign({}, cardS, { borderLeft: isShort ? "4px solid #dc2626" : "4px solid #10b981" })}>
-            <div style={lblS}>{isShort ? "⚠ Shortfall" : "✓ Covered"}</div>
-            <div style={Object.assign({}, numS, { color: isShort ? "#dc2626" : "#059669" })}>{isShort ? "−" + fmt(gap) : fmt(avail - actionTotal)}</div>
-            {isShort && <div style={{ fontSize: 13, color: "#991b1b", marginTop: 4, fontWeight: 600 }}>Need {fmt(gap)} more</div>}
+          <div style={Object.assign({}, cardS, { borderLeft: isShortEff ? "4px solid #dc2626" : "4px solid #10b981" })}>
+            <div style={lblS}>{isShortEff ? "⚠ Shortfall" : "✓ Covered"}</div>
+            <div style={Object.assign({}, numS, { color: isShortEff ? "#dc2626" : "#059669" })}>{isShortEff ? "−" + fmt(gapEff) : fmt(availEff - actionTotalEff)}</div>
+            {isShortEff && <div style={{ fontSize: 13, color: "#991b1b", marginTop: 4, fontWeight: 600 }}>Need {fmt(gapEff)} more</div>}
           </div>
         </div>
 
@@ -2533,14 +2661,39 @@ function PaymentDashboard({ onLogout, userName }) {
                     <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: fcData.gap > 0 ? "#EF4444" : "#10B981" }}>{fcData.gap > 0 ? "−" + fmt(fcData.gap) : fmt(Math.abs(fcData.gap))}</div>
                   </div>
                 </div>
-                <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+                <div style={{ maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
                   {fcData.dates.map(function(date) {
                     var d = fcData.byDate[date];
+                    var isOpen = !!fcOpenDays[date];
                     return (
-                      <div key={date} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 9px", borderRadius: 6, background: "#f8fafc" }}>
-                        <div style={{ width: 75, flexShrink: 0, fontSize: 11, fontWeight: 600, color: date === td ? "#93C5FD" : "#CBD5E1" }}>{date === td ? "Today" : fmtS(date)}</div>
-                        <div style={{ flex: 1, fontSize: 10, color: "#64748B" }}>{d.items.length} items</div>
-                        <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a" }}>{fmt(d.total)}</div>
+                      <div key={date} style={{ borderRadius: 6, background: "#f8fafc", overflow: "hidden", flexShrink: 0 }}>
+                        <div onClick={function(){ setFcOpenDays(function(prev){ var n = Object.assign({}, prev); if (n[date]) delete n[date]; else n[date] = true; return n; }); }} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: "pointer", userSelect: "none", minHeight: 30, lineHeight: 1.2 }}>
+                          <span style={{ width: 14, fontSize: 14, fontWeight: 700, color: "#64748b", textAlign: "center", flexShrink: 0 }}>{isOpen ? "−" : "+"}</span>
+                          <div style={{ width: 90, flexShrink: 0, fontSize: 12, fontWeight: 600, color: date === td ? "#2563eb" : "#64748b" }}>{date === td ? "Today" : fmtS(date)}</div>
+                          <div style={{ flex: 1, fontSize: 11, color: "#64748B" }}>{d.items.length} item{d.items.length === 1 ? "" : "s"}</div>
+                          <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "#0f172a", flexShrink: 0 }}>{fmt(d.total)}</div>
+                        </div>
+                        {isOpen && (
+                          <div style={{ background: "white", borderTop: "1px solid #e2e8f0", padding: "6px 10px 8px 32px", display: "flex", flexDirection: "column", gap: 4 }}>
+                            {d.items.map(function(p, i) {
+                              var orig = payments[p.id];
+                              var wasSkipped = orig && orig.excluded;
+                              var resumeD = skipUntil[p.id];
+                              var label = p.isReminder ? p.name + " (reminder)" : p.name;
+                              return (
+                                <div key={p.id + "_" + i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, lineHeight: 1.3 }}>
+                                  <div style={{ flex: 1, color: "#334155", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    <span style={{ fontWeight: 500 }}>{label}</span>
+                                    <span style={{ color: "#94a3b8", marginLeft: 6, fontSize: 10 }}>{p.category}</span>
+                                    {wasSkipped && <span style={{ marginLeft: 6, fontSize: 10, color: "#d97706", background: "#fef3c7", padding: "0 5px", borderRadius: 3, fontWeight: 600 }}>resumes{resumeD ? " " + fmtS(resumeD) : ""}</span>}
+                                    {p.status === PAID && <span style={{ marginLeft: 6, fontSize: 10, color: "#a16207", background: "#fef9c3", padding: "0 5px", borderRadius: 3, fontWeight: 600 }}>pending</span>}
+                                  </div>
+                                  <div style={{ fontFamily: "'JetBrains Mono',monospace", fontWeight: 600, color: "#0f172a", flexShrink: 0 }}>{fmt(effAmt(p))}</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -2609,85 +2762,86 @@ function PaymentDashboard({ onLogout, userName }) {
 
         {/* Summary */}
         {selDay && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "6px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "6px 12px", background: "#eff6ff", borderRadius: 8, border: "1px solid #bfdbfe", flexWrap: "wrap" }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: "#1e40af" }}>📅 Funding needed through: {fmtS(selDay)} ({dayN(selDay)})</span>
             <div style={{ flex: 1 }} />
+            {(function() {
+              var wd = new Date(parseInt(selDay.slice(0,4)), parseInt(selDay.slice(5,7))-1, parseInt(selDay.slice(8,10))).getDay();
+              if (wd === 0 || wd === 6) return null;
+              var closed = !!officeClosed[selDay];
+              return <button onClick={function() {
+                var oc = Object.assign({}, officeClosed);
+                if (closed) { delete oc[selDay]; } else { oc[selDay] = "Office Closed"; }
+                setOfficeClosed(oc);
+                updateClosedDays(oc, cy >= 2020 ? cy : new Date().getFullYear());
+              }} style={{ background: closed ? "#fee2e2" : "#f0fdf4", border: "1px solid " + (closed ? "#fca5a5" : "#bbf7d0"), borderRadius: 4, padding: "3px 10px", cursor: "pointer", color: closed ? "#dc2626" : "#16a34a", fontSize: 11, fontWeight: 600 }}>{closed ? "Reopen Office" : "Mark Closed"}</button>;
+            })()}
             <button onClick={function() { setSelDay(null); setShowCal(false); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ background: "#dbeafe", border: "none", borderRadius: 4, padding: "3px 8px", cursor: "pointer", color: "#1e40af", fontSize: 11, fontWeight: 600 }}>✕ Clear filter</button>
           </div>
         )}
         
-        {/* Date bar */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
-          <button onClick={function() { if (!showCal) { var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); } setShowCal(!showCal); }} style={{ background: showCal ? "#eff6ff" : "white", border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 7px", cursor: "pointer", display: "flex", alignItems: "center" }}>
-            <CalIcon size={16} color={showCal ? "#60A5FA" : "#94A3B8"} />
+        {/* Today card */}
+        <div style={{ background: "white", borderRadius: 12, padding: "12px 16px", boxShadow: "0 1px 3px rgba(0,0,0,0.08)", border: "1px solid #e2e8f0", marginBottom: 10, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <button onClick={function() { if (!showCal) { var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); } setShowCal(!showCal); }} title="Open calendar" style={{ background: "#eff6ff", border: "1px solid #dbeafe", borderRadius: 10, width: 42, height: 42, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, padding: 0 }}>
+            <CalIcon size={20} color="#2563eb" />
           </button>
-          <span style={{ fontSize: 16, fontWeight: 700, color: "#0f172a" }}>Today</span>
-          <span style={{ fontSize: 12, color: "#64748B" }}>{fmtS(td)}</span>
-          {(function() {
-            var tp = td.split("-");
-            var tY = +tp[0], tM = +tp[1]-1, tD = +tp[2];
-            var th = gregToHebrew(tY, tM, tD);
-            var hebDays = ["\u05D9\u05D5\u05DD \u05D0\u05F3","\u05D9\u05D5\u05DD \u05D1\u05F3","\u05D9\u05D5\u05DD \u05D2\u05F3","\u05D9\u05D5\u05DD \u05D3\u05F3","\u05D9\u05D5\u05DD \u05D4\u05F3","\u05E2\u05E8\u05D1 \u05E9\u05D1\u05EA","\u05E9\u05D1\u05EA"];
-            var dow = new Date(tY, tM, tD).getDay();
-            var isFri = dow === 5;
-            var isSat = dow === 6;
-            var parts = [];
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: "1 1 auto" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: "#0f172a" }}>Today {dayN(td)}, {fmtS(td).replace(/^[A-Za-z]+,\s*/, "")}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              {(function() {
+                var tp = td.split("-");
+                var tY = +tp[0], tM = +tp[1]-1, tDd = +tp[2];
+                var th = gregToHebrew(tY, tM, tDd);
+                var hebDays = ["\u05D9\u05D5\u05DD \u05D0\u05F3","\u05D9\u05D5\u05DD \u05D1\u05F3","\u05D9\u05D5\u05DD \u05D2\u05F3","\u05D9\u05D5\u05DD \u05D3\u05F3","\u05D9\u05D5\u05DD \u05D4\u05F3","\u05E2\u05E8\u05D1 \u05E9\u05D1\u05EA","\u05E9\u05D1\u05EA"];
+                var dow = new Date(tY, tM, tDd).getDay();
+                var isFri = dow === 5;
+                var isSat = dow === 6;
+                var parts = [];
+                parts.push(<span key="heb" style={{ fontSize: 12, color: "#9ca3af", direction: "rtl" }}>{hebDays[dow] + " · " + toHebNum(th.day) + " " + hebrewMonthName(th.month) + " " + toHebYear(th.year)}</span>);
+                if (isFri) {
+                  var cl = getCandleLighting(tY, tM, tDd, zmanLoc);
+                  if (cl) parts.push(<span key="candle" style={{ fontSize: 11, fontWeight: 600, color: "#d97706", background: "#fefce8", padding: "1px 8px", borderRadius: 4 }}>{"\uD83D\uDD6F\uFE0F " + cl}</span>);
+                }
+                if (!isFri) {
+                  var tmrw = new Date(tY, tM, tDd + 1);
+                  var tmrwKey = toISO(tmrw);
+                  var tmrwHol = jewishHols[tmrwKey];
+                  if (tmrwHol && OFFICE_CLOSED_HOLIDAYS.indexOf(tmrwHol) !== -1) {
+                    var cl2 = getCandleLighting(tY, tM, tDd, zmanLoc);
+                    if (cl2) parts.push(<span key="candle2" style={{ fontSize: 11, fontWeight: 600, color: "#d97706", background: "#fefce8", padding: "1px 8px", borderRadius: 4 }}>{"\uD83D\uDD6F\uFE0F " + cl2 + " (ער\"ח " + tmrwHol + ")"}</span>);
+                  }
+                }
+                if (isSat) {
+                  var hav = getHavdalahTime(tY, tM, tDd, zmanLoc);
+                  if (hav) parts.push(<span key="hav" style={{ fontSize: 11, fontWeight: 600, color: "#6d28d9", background: "#f5f3ff", padding: "1px 8px", borderRadius: 4 }}>{"\u2728 " + hav}</span>);
+                }
+                var parsha = "";
+                if (isFri) parsha = getParshaForShabbat(tY, tM, tDd + 1);
+                if (isSat) parsha = getParshaForShabbat(tY, tM, tDd);
+                if (parsha) parts.push(<span key="parsha" style={{ fontSize: 11, fontWeight: 600, color: "#7c3aed", background: "rgba(139,92,246,.08)", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{"\uD83D\uDCDC " + parsha}</span>);
+                var specShab = [];
+                if (isFri) specShab = getSpecialShabbos(tY, tM, tDd + 1);
+                if (isSat) specShab = getSpecialShabbos(tY, tM, tDd);
+                if (specShab.length > 0) {
+                  specShab.forEach(function(ss, si) {
+                    parts.push(<span key={"spec"+si} style={{ fontSize: 11, fontWeight: 600, color: "#be185d", background: "#fce7f3", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{ss}</span>);
+                  });
+                }
+                var fastI = getFastTimes(tY, tM, tDd);
+                if (fastI) parts.push(<span key="fast" style={{ fontSize: 11, fontWeight: 600, color: "#dc2626", background: "#fee2e2", padding: "1px 8px", borderRadius: 4 }}>{"\u23F0"} Fast ends {fastI.end60}</span>);
+                return parts;
+              })()}
+              {jewishHols[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#92400e", background: "#fefce8", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{jewishHols[td]}</span>}
+              {_bankClosed[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#1e40af", background: "#eff6ff", padding: "1px 8px", borderRadius: 4 }}>{String.fromCodePoint(0x1F3E6)} {_bankClosed[td]}</span>}
+            </div>
+          </div>
+        </div>
 
-            // Hebrew day name + date
-            parts.push(<span key="heb" style={{ fontSize: 12, color: "#9ca3af", direction: "rtl" }}>{hebDays[dow] + " · " + toHebNum(th.day) + " " + hebrewMonthName(th.month) + " " + toHebYear(th.year)}</span>);
-
-            // Candle lighting on Friday
-            if (isFri) {
-              var cl = getCandleLighting(tY, tM, tD, zmanLoc);
-              if (cl) parts.push(<span key="candle" style={{ fontSize: 11, fontWeight: 600, color: "#d97706", background: "#fefce8", padding: "1px 8px", borderRadius: 4 }}>{"\uD83D\uDD6F\uFE0F " + cl}</span>);
-            }
-
-            // Erev Yom Tov candle lighting (not Friday)
-            if (!isFri) {
-              var tmrw = new Date(tY, tM, tD + 1);
-              var tmrwKey = toISO(tmrw);
-              var tmrwHol = jewishHols[tmrwKey];
-              if (tmrwHol && OFFICE_CLOSED_HOLIDAYS.indexOf(tmrwHol) !== -1) {
-                var cl2 = getCandleLighting(tY, tM, tD, zmanLoc);
-                if (cl2) parts.push(<span key="candle2" style={{ fontSize: 11, fontWeight: 600, color: "#d97706", background: "#fefce8", padding: "1px 8px", borderRadius: 4 }}>{"\uD83D\uDD6F\uFE0F " + cl2 + " (ער\"ח " + tmrwHol + ")"}</span>);
-              }
-            }
-
-            // Havdalah on Saturday
-            if (isSat) {
-              var hav = getHavdalahTime(tY, tM, tD, zmanLoc);
-              if (hav) parts.push(<span key="hav" style={{ fontSize: 11, fontWeight: 600, color: "#6d28d9", background: "#f5f3ff", padding: "1px 8px", borderRadius: 4 }}>{"\u2728 " + hav}</span>);
-            }
-
-            // Parsha on Friday (this Shabbos) or Saturday
-            var parsha = "";
-            if (isFri) parsha = getParshaForShabbat(tY, tM, tD + 1);
-            if (isSat) parsha = getParshaForShabbat(tY, tM, tD);
-            if (parsha) parts.push(<span key="parsha" style={{ fontSize: 11, fontWeight: 600, color: "#7c3aed", background: "rgba(139,92,246,.08)", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{"\uD83D\uDCDC " + parsha}</span>);
-
-            // Special Shabbos — on Friday (for this coming Shabbos) or Saturday
-            var specShab = [];
-            if (isFri) specShab = getSpecialShabbos(tY, tM, tD + 1);
-            if (isSat) specShab = getSpecialShabbos(tY, tM, tD);
-            if (specShab.length > 0) {
-              specShab.forEach(function(ss, si) {
-                parts.push(<span key={"spec"+si} style={{ fontSize: 11, fontWeight: 600, color: "#be185d", background: "#fce7f3", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{ss}</span>);
-              });
-            }
-
-            // Fast day
-            var fastI = getFastTimes(tY, tM, tD);
-            if (fastI) {
-              parts.push(<span key="fast" style={{ fontSize: 11, fontWeight: 600, color: "#dc2626", background: "#fee2e2", padding: "1px 8px", borderRadius: 4 }}>{"\u23F0"} Fast ends {fastI.end60}</span>);
-            }
-
-            return parts;
-          })()}
-          {jewishHols[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#92400e", background: "#fefce8", padding: "1px 8px", borderRadius: 4, direction: "rtl" }}>{jewishHols[td]}</span>}
-          {_bankClosed[td] && <span style={{ fontSize: 11, fontWeight: 600, color: "#1e40af", background: "#eff6ff", padding: "1px 8px", borderRadius: 4 }}>{String.fromCodePoint(0x1F3E6)} {_bankClosed[td]}</span>}
-          <div style={{ flex: 1 }} />
-          {/* Search bar */}
-          <div style={{ position: "relative", width: 240 }}>
+        {/* Search bar row */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <div style={{ position: "relative", flex: "1 1 240px", maxWidth: 360 }}>
             <input value={searchQ} onChange={function(e) { setSearchQ(e.target.value); }} placeholder="Search name, check #, amount, notes..." style={{
               width: "100%", padding: "7px 12px 7px 32px", borderRadius: 8, border: searchQ ? "2px solid #3b82f6" : "1px solid #e2e8f0",
               fontSize: 12, outline: "none", color: "#111827", background: searchQ ? "#eff6ff" : "white", fontFamily: "inherit"
@@ -2707,9 +2861,10 @@ function PaymentDashboard({ onLogout, userName }) {
           </div>
         )}
 
-        {/* Calendar */}
+        {/* Calendar popup */}
         {showCal && (
-          <div style={{ background: "white", boxShadow: "0 1px 3px rgba(0,0,0,0.1)", borderRadius: 11, padding: 12, border: "1px solid #e5e7eb", marginBottom: 14 }}>
+          <div onClick={function() { setShowCal(false); setSelDay(null); setShowMonthPicker(false); var n = new Date(); setCy(n.getFullYear()); setCm(n.getMonth()); }} style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "flex-start", justifyContent: "center", background: "rgba(15,23,42,0.55)", backdropFilter: "blur(3px)", padding: "40px 16px", overflowY: "auto" }}>
+          <div onClick={function(e){ e.stopPropagation(); }} style={{ background: "white", boxShadow: "0 25px 50px -12px rgba(0,0,0,0.35)", borderRadius: 14, padding: 16, border: "1px solid #e5e7eb", width: "100%", maxWidth: 820 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 0 }}>
                 <button onClick={function() { navMo(-1); setShowMonthPicker(false); }} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 10px", color: "#374151", fontSize: 16, cursor: "pointer", fontWeight: 700 }}>‹</button>
@@ -2768,7 +2923,16 @@ function PaymentDashboard({ onLogout, userName }) {
                 var isSel = c.ds === selDay;
                 var cellBg = isSel ? "#eff6ff" : c.bankHol ? "#eff6ff" : c.isClosed ? "#fef2f2" : c.isWknd ? "#f1f5f9" : c.holiday ? "#fefce8" : c.due > 0 ? "white" : "#f8fafc";
                 return (
-                  <button key={c.ds} onClick={function() { setSelDay(isSel ? null : c.ds); }} style={{
+                  <button key={c.ds} onClick={function() {
+                    if (isSel) {
+                      // Clicking the already-selected day clears the filter
+                      setSelDay(null);
+                    } else {
+                      setSelDay(c.ds);
+                    }
+                    // Close the popup in either case so the filtered main view becomes visible
+                    setShowCal(false);
+                  }} style={{
                     background: cellBg,
                     border: isSel ? "2px solid #2563eb" : isT ? "2px solid #3b82f6" : c.bankHol ? "1px solid #93c5fd" : c.isClosed ? "1px solid #fca5a5" : c.holiday ? "1px solid #fde68a" : "1px solid #e5e7eb",
                     borderRadius: 6, padding: "3px 2px", cursor: "pointer", textAlign: "center", minHeight: 70,
@@ -2883,11 +3047,13 @@ function PaymentDashboard({ onLogout, userName }) {
             )}
 
           </div>
+          </div>
         )}
         {selCount > 0 && (
           <div style={{ background: "linear-gradient(135deg,#1e40af,#3b82f6)", borderRadius: 10, padding: "10px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ color: "white", fontSize: 13, fontWeight: 600 }}>{selCount} selected</span>
             <span style={{ color: "#93c5fd", fontSize: 14, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", background: "rgba(255,255,255,0.15)", padding: "3px 10px", borderRadius: 6 }}>{fmt(selIds.reduce(function(s,id){var p=payments[id];return s+(p?effAmt(p):0);},0))}</span>
+            <button onClick={function(){ setExclSel(function(v){ return !v; }); }} title="Recalculate top totals as if the selected items were skipped" style={{ background: exclSel ? "#fbbf24" : "rgba(255,255,255,0.2)", color: exclSel ? "#78350f" : "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{exclSel ? "✓ Excluding from totals" : "🧮 Exclude from totals"}</button>
             <div style={{ flex: 1 }} />
             {tab === "action" && <button onClick={bulkPaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>💰 Mark Paid</button>}
             {tab === "action" && <button onClick={bulkSkip} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>⏭️ Skip</button>}
@@ -2897,7 +3063,7 @@ function PaymentDashboard({ onLogout, userName }) {
             {tab === "skipped" && <button onClick={bulkResumeDate} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>⏰ Change Resume Date</button>}
             {tab === "cleared" && <button onClick={bulkUnpaid} style={{ background: "rgba(255,255,255,0.2)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>↩️ Undo</button>}
             <button onClick={bulkDelete} style={{ background: "rgba(239,68,68,0.3)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>🗑️ Delete</button>
-            <button onClick={selNone} style={{ background: "rgba(255,255,255,0.15)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ Clear</button>
+            <button onClick={function(){ selNone(); setExclSel(false); }} style={{ background: "rgba(255,255,255,0.15)", color: "white", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ Clear</button>
           </div>
         )}
 
@@ -2910,7 +3076,7 @@ function PaymentDashboard({ onLogout, userName }) {
             { k: "skipped", l: "Skipped", n: skippedItems.length, c: "#94A3B8" }
           ].map(function(t) {
             return (
-              <button key={t.k} onClick={function() { setTab(t.k); setSelected({}); }} style={{
+              <button key={t.k} onClick={function() { setTab(t.k); setSelected({}); setExclSel(false); }} style={{
                 flex: 1, padding: "9px 4px", borderRadius: 7, border: "none",
                 background: tab === t.k ? "#0f172a" : "transparent",
                 color: tab === t.k ? "white" : "#374151", fontSize: 12, fontWeight: 600,
@@ -3545,7 +3711,7 @@ function PaymentDashboard({ onLogout, userName }) {
       </Modal>
 
       <footer style={{ textAlign: "center", padding: 24, color: "#6b7280", fontSize: 13, display: "flex", justifyContent: "center", alignItems: "center", gap: 12 }}>
-        <span>🔒 Data stored in SharePoint · OpsPay v2.0</span>
+        <span>🔒 Data stored in SharePoint · OpsPay v2.6</span>
         <span style={{
           fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
           background: saveStatus === "saving" ? "#fef3c7" : saveStatus === "error" ? "#fee2e2" : "#d1fae5",
