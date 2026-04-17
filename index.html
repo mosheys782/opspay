@@ -2473,9 +2473,9 @@ function PaymentDashboard({ onLogout, userName }) {
             fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace",
             color: isRem ? (sec === "cleared" || isExcl ? "#c4b5fd" : "#7c3aed") : (sec === "cleared" || isExcl ? "#94a3b8" : "#111827"),
             textDecoration: sec === "cleared" || isExcl ? "line-through" : "none"
-          }}>{fmt(p.amount)}</div>
+          }}>{fmt(amt)}</div>
           {isRem && <div style={{ fontSize: 10, color: "#a78bfa", fontWeight: 600 }}>reminder</div>}
-          {isCC && !isRem && p.useMin && <div style={{ fontSize: 11, color: "#d97706" }}>min pmt</div>}
+          {isCC && !isRem && p.useMin && <div style={{ fontSize: 11, color: "#d97706" }}>min pmt · stmt {fmt(p.amount)}</div>}
         </div>
 
         {/* Actions */}
@@ -3734,7 +3734,7 @@ function PaymentDashboard({ onLogout, userName }) {
       </Modal>
 
       <footer style={{ textAlign: "center", padding: 24, color: "#6b7280", fontSize: 13, display: "flex", justifyContent: "center", alignItems: "center", gap: 12 }}>
-        <span>🔒 Data stored in SharePoint · OpsPay v2.8</span>
+        <span>🔒 Data stored in SharePoint · OpsPay v2.9</span>
         <span style={{
           fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
           background: saveStatus === "saving" ? "#fef3c7" : saveStatus === "error" ? "#fee2e2" : "#d1fae5",
